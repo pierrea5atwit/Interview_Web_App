@@ -12,6 +12,10 @@ build/
 venv/
 env/
 
+
+# Claude
+CLAUDE/
+
 # Environment
 .env
 .env.*
@@ -41,6 +45,9 @@ dist/
 
 # Audio uploads (runtime)
 backend/app/uploads/
+
+# Project docs (PDFs — tracked locally, not needed by the app)
+*.pdf
 
 # HuggingFace / model cache
 .cache/

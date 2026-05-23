@@ -10,14 +10,14 @@ from dotenv import load_dotenv, set_key
 from frontend.styles import inject_css
 from backend.app.services.responses import load_best_responses, _RESPONSES_FILE
 
-load_dotenv()
-inject_css()
-
 st.set_page_config(
     page_title="Settings — InterviewAI",
     page_icon="⚙️",
     layout="wide",
 )
+
+load_dotenv()
+inject_css()
 
 st.markdown("# ⚙️ Settings")
 st.markdown("Configure the app's AI models and preferences.")

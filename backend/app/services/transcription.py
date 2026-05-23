@@ -9,7 +9,7 @@ def _get_model():
     global _model
     if _model is None:
         from faster_whisper import WhisperModel
-        model_size = os.getenv("TRANSCRIPTION_MODEL", "base")
+        model_size = os.getenv("TRANSCRIPTION_MODEL", "tiny")
         _model = WhisperModel(model_size, device="cpu", compute_type="int8")
     return _model
 

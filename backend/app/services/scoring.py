@@ -74,9 +74,20 @@ def _score_rule_based(question: str, transcript: str) -> dict:
     word_count = len(words)
     lower = transcript.lower()
 
-    sentences = [s.strip() for s in re.split(r"[.!?]", transcript) if s.strip()]
-    avg_sentence_len = word_count / max(len(sentences), 1)
-    clarity = max(0, min(10, round(10 - max(0, avg_sentence_len - 25) * 0.4)))
+    # Clarity: Whisper output often has no punctuation, so avoid sentence-splitting.
+    # Instead score based on whether the response is an appropriate length to follow.
+    if 80 <= word_count <= 220:
+        clarity = 8
+        clarity_note = "Good length — easy to follow."
+    elif 40 <= word_count < 80 or 220 < word_count <= 320:
+        clarity = 6
+        clarity_note = "Slightly short." if word_count < 80 else "Getting long — may lose the listener."
+    elif word_count < 40:
+        clarity = 4
+        clarity_note = "Too brief to evaluate properly."
+    else:
+        clarity = 3
+        clarity_note = "Very long — hard to follow."
 
     if 100 <= word_count <= 250:
         conciseness = 8
@@ -115,7 +126,7 @@ def _score_rule_based(question: str, transcript: str) -> dict:
 
     return {
         "clarity": clarity,
-        "clarity_feedback": f"Avg sentence length: {avg_sentence_len:.0f} words. {'Good flow.' if clarity >= 7 else 'Try shorter sentences.'}",
+        "clarity_feedback": clarity_note,
         "conciseness": conciseness,
         "conciseness_feedback": f"Response is {word_count} words. {'On target.' if conciseness >= 7 else 'Aim for 100–250 words.'}",
         "structure": structure,
@@ -141,3 +152,67 @@ def score_response(question: str, transcript: str) -> dict:
 
 def overall_score(scores: dict) -> float:
     return round(sum(scores.get(c, 0) for c in CATEGORIES) / len(CATEGORIES), 1)
+
+
+_BETTER_PROMPT = """You are an expert interview coach. A candidate answered an interview question.
+Rewrite their response as a stronger 3–5 sentence answer that scores higher on clarity, structure, and confidence.
+Keep the same topic and personal voice, but fix the weakest areas.
+
+Question: {question}
+Original response: {transcript}
+Weakest areas: {weak_cats}
+
+Write ONLY the improved response — no intro, no labels, just the answer itself."""
+
+_BETTER_FALLBACK = (
+    "Try using the STAR method: open with the **Situation** (one sentence), "
+    "describe your **Task**, walk through the key **Actions** you took (two to three sentences), "
+    "and close with the **Result** — ideally a measurable outcome. "
+    "Aim for 150–200 words, start with a confident statement, and cut any filler words."
+)
+
+
+def _weak_categories(scores: dict) -> str:
+    return ", ".join(
+        cat for cat in CATEGORIES if scores.get(cat, 10) < 6
+    ) or "overall polish"
+
+
+def generate_better_response(question: str, transcript: str, scores: dict) -> str:
+    """Return an example of a stronger answer. Tries Ollama → HuggingFace → template."""
+    prompt = _BETTER_PROMPT.format(
+        question=question,
+        transcript=transcript[:1500],
+        weak_cats=_weak_categories(scores),
+    )
+
+    def _try_ollama() -> str:
+        import ollama
+        client = ollama.Client(host=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
+        r = client.chat(
+            model=os.getenv("OLLAMA_MODEL", "llama3.2"),
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0.4},
+        )
+        return r.message.content.strip()
+
+    def _try_huggingface() -> str:
+        from huggingface_hub import InferenceClient
+        token = os.getenv("HF_TOKEN", "")
+        client = InferenceClient(token=token if token else None)
+        return client.text_generation(
+            prompt,
+            model="mistralai/Mistral-7B-Instruct-v0.2",
+            max_new_tokens=300,
+            temperature=0.4,
+        ).strip()
+
+    for fn in [_try_ollama, _try_huggingface]:
+        try:
+            result = fn()
+            if result:
+                return result
+        except Exception:
+            continue
+
+    return _BETTER_FALLBACK
