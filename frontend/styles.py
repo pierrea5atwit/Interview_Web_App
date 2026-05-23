@@ -139,13 +139,58 @@ def inject_css():
             font-weight: 600;
         }
 
-        /* ── Hide default streamlit menu (optional) ──── */
-        /* #MainMenu { visibility: hidden; } */
+        /* ── Sidebar nav styling ─────────────────────── */
+        section[data-testid="stSidebar"] {
+            background: #0f172a;
+            border-right: 1px solid rgba(255,255,255,0.07);
+        }
+        section[data-testid="stSidebar"] .stButton > button {
+            background: transparent !important;
+            border: none !important;
+            text-align: left !important;
+            color: #94a3b8 !important;
+            font-weight: 500 !important;
+            font-size: 0.9rem !important;
+            padding: 8px 12px !important;
+            border-radius: 8px !important;
+            transition: background 0.15s, color 0.15s;
+        }
+        section[data-testid="stSidebar"] .stButton > button:hover {
+            background: rgba(99,102,241,0.12) !important;
+            color: #e2e8f0 !important;
+        }
+        section[data-testid="stSidebar"] .stButton > button:disabled {
+            background: rgba(99,102,241,0.18) !important;
+            color: #a5b4fc !important;
+            opacity: 1 !important;
+        }
+
+        /* ── Page divider ────────────────────────────── */
+        hr { border-color: rgba(255,255,255,0.07) !important; }
+
+        /* ── Metric labels ───────────────────────────── */
+        [data-testid="stMetricLabel"] { color: #64748b !important; font-size: 0.75rem !important; }
+        [data-testid="stMetricValue"] { font-weight: 700 !important; color: #e2e8f0 !important; }
+
+        /* ── Hide default streamlit menu ─────────────── */
         footer { visibility: hidden; }
+        #MainMenu { visibility: hidden; }
 
         /* ── Progress bar color override ─────────────── */
         .stProgress > div > div > div > div {
             background: linear-gradient(90deg, #6366f1, #8b5cf6);
+        }
+
+        /* ── Button — primary ────────────────────────── */
+        .stButton > button[kind="primary"] {
+            background: linear-gradient(135deg, #6366f1, #8b5cf6) !important;
+            border: none !important;
+            font-weight: 600 !important;
+        }
+
+        /* ── Info box ────────────────────────────────── */
+        .stAlert {
+            border-radius: 10px !important;
         }
         </style>
         """,

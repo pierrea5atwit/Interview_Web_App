@@ -142,12 +142,17 @@ def _score_rule_based(question: str, transcript: str) -> dict:
 
 def score_response(question: str, transcript: str) -> dict:
     """Try Ollama → HuggingFace → rule-based. Returns scoring dict."""
-    for scorer in [_score_with_ollama, _score_with_huggingface, _score_rule_based]:
+    llm_failed = False
+    for scorer in [_score_with_ollama, _score_with_huggingface]:
         try:
             return scorer(question, transcript)
         except Exception:
+            llm_failed = True
             continue
-    return _score_rule_based(question, transcript)
+    result = _score_rule_based(question, transcript)
+    if llm_failed:
+        result["scorer"] = "rule_based (LLM unavailable)"
+    return result
 
 
 def overall_score(scores: dict) -> float:
@@ -174,7 +179,7 @@ _BETTER_FALLBACK = (
 
 def _weak_categories(scores: dict) -> str:
     return ", ".join(
-        cat for cat in CATEGORIES if scores.get(cat, 10) < 6
+        cat for cat in CATEGORIES if scores.get(cat, 0) < 6
     ) or "overall polish"
 
 
@@ -215,4 +220,4 @@ def generate_better_response(question: str, transcript: str, scores: dict) -> st
         except Exception:
             continue
 
-    return _BETTER_FALLBACK
+    raise RuntimeError("LLM unavailable")

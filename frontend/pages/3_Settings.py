@@ -19,8 +19,30 @@ st.set_page_config(
 load_dotenv()
 inject_css()
 
-st.markdown("# ⚙️ Settings")
-st.markdown("Configure the app's AI models and preferences.")
+with st.sidebar:
+    st.markdown(
+        "<div style='padding:12px 0 20px;'>"
+        "<div style='font-size:1.4rem; font-weight:800; color:#6366f1; letter-spacing:-0.5px;'>InterviewAI</div>"
+        "<div style='font-size:0.75rem; color:#64748b; margin-top:2px;'>Your personal coach</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("🏠  Home", use_container_width=True):
+        st.switch_page("app.py")
+    if st.button("🎙  Practice", use_container_width=True):
+        st.switch_page("pages/1_Practice.py")
+    if st.button("🏆  Best Responses", use_container_width=True):
+        st.switch_page("pages/2_Best_Responses.py")
+    st.button("⚙️  Settings", use_container_width=True, disabled=True, type="primary")
+
+st.markdown(
+    "<div style='display:flex; align-items:center; gap:12px; margin-bottom:4px;'>"
+    "<span style='font-size:1.8rem;'>⚙️</span>"
+    "<div><h2 style='margin:0; font-weight:800;'>Settings</h2>"
+    "<p style='margin:0; color:#64748b; font-size:0.9rem;'>Configure AI models and preferences</p>"
+    "</div></div>",
+    unsafe_allow_html=True,
+)
 
 env_path = Path(__file__).parent.parent.parent / ".env"
 

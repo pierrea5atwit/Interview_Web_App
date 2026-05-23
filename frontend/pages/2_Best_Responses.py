@@ -1,3 +1,4 @@
+import html as _html
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -17,8 +18,30 @@ st.set_page_config(
 
 inject_css()
 
-st.markdown("# 🏆 Best Responses")
-st.markdown("Your saved high-scoring interview answers, sorted by score.")
+with st.sidebar:
+    st.markdown(
+        "<div style='padding:12px 0 20px;'>"
+        "<div style='font-size:1.4rem; font-weight:800; color:#6366f1; letter-spacing:-0.5px;'>InterviewAI</div>"
+        "<div style='font-size:0.75rem; color:#64748b; margin-top:2px;'>Your personal coach</div>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    if st.button("🏠  Home", use_container_width=True):
+        st.switch_page("app.py")
+    if st.button("🎙  Practice", use_container_width=True):
+        st.switch_page("pages/1_Practice.py")
+    st.button("🏆  Best Responses", use_container_width=True, disabled=True, type="primary")
+    if st.button("⚙️  Settings", use_container_width=True):
+        st.switch_page("pages/3_Settings.py")
+
+st.markdown(
+    "<div style='display:flex; align-items:center; gap:12px; margin-bottom:4px;'>"
+    "<span style='font-size:1.8rem;'>🏆</span>"
+    "<div><h2 style='margin:0; font-weight:800;'>Best Responses</h2>"
+    "<p style='margin:0; color:#64748b; font-size:0.9rem;'>Your saved high-scoring interview answers</p>"
+    "</div></div>",
+    unsafe_allow_html=True,
+)
 
 try:
     responses = load_best_responses()
@@ -117,13 +140,13 @@ for resp in filtered:
                 unsafe_allow_html=True,
             )
             st.markdown(
-                f'<div class="question-card" style="margin:8px 0;">{resp["question"]}</div>',
+                f'<div class="question-card" style="margin:8px 0;">{_html.escape(resp["question"])}</div>',
                 unsafe_allow_html=True,
             )
             st.markdown("**Your answer:**")
             st.markdown(
                 f'<div class="card" style="font-size:0.92rem; line-height:1.7; color:#cbd5e1;">'
-                f'{resp["transcript"]}</div>',
+                f'{_html.escape(resp["transcript"])}</div>',
                 unsafe_allow_html=True,
             )
 
