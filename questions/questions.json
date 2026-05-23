@@ -1,0 +1,71 @@
+{
+  "software_engineering": {
+    "behavioral": [
+      "Tell me about a time you had to debug a difficult problem under pressure.",
+      "Describe a situation where you disagreed with a teammate. How did you resolve it?",
+      "Tell me about a project you're most proud of and your role in it.",
+      "How do you prioritize tasks when working on multiple deadlines?",
+      "Describe a time you received critical feedback and how you responded."
+    ],
+    "technical": [
+      "Explain the difference between a stack and a queue.",
+      "What is the time complexity of a binary search?",
+      "How does garbage collection work in a language of your choice?",
+      "What is REST and how does it differ from GraphQL?",
+      "Walk me through how you'd design a URL shortener."
+    ],
+    "mixed": [
+      "Tell me about a technical decision you made that you later regretted.",
+      "How do you stay current with new technologies?",
+      "Describe a time you had to explain a complex technical concept to a non-technical stakeholder.",
+      "What's your approach to writing maintainable code?",
+      "Tell me about a time you improved a process or system significantly."
+    ]
+  },
+  "marketing": {
+    "behavioral": [
+      "Tell me about a campaign you ran that didn't go as planned. What did you learn?",
+      "Describe a time you used data to change a marketing strategy.",
+      "How do you handle tight deadlines on creative projects?",
+      "Tell me about a time you had to market to an audience you weren't familiar with.",
+      "Describe a situation where you had to align marketing goals with sales goals."
+    ],
+    "technical": [
+      "What metrics do you use to measure the success of a content campaign?",
+      "Explain the difference between SEO and SEM.",
+      "How would you approach building an email drip campaign from scratch?",
+      "What is A/B testing and when would you use it?",
+      "How do you calculate customer acquisition cost (CAC)?"
+    ],
+    "mixed": [
+      "Walk me through a go-to-market strategy you've developed.",
+      "How do you balance creativity with data-driven decision making?",
+      "Tell me about a time you grew an audience or user base significantly.",
+      "What tools do you use for marketing analytics and why?",
+      "Describe your process for developing a brand voice."
+    ]
+  },
+  "finance": {
+    "behavioral": [
+      "Tell me about a time you identified a financial risk before it became a problem.",
+      "Describe a situation where you had to explain a financial report to a non-finance audience.",
+      "How do you handle pressure during quarter-end close?",
+      "Tell me about a time you found an error in financial data. What did you do?",
+      "Describe a time you had to make a financial recommendation with incomplete data."
+    ],
+    "technical": [
+      "What is the difference between GAAP and IFRS?",
+      "Walk me through a DCF analysis.",
+      "How do you calculate EBITDA and what does it tell you?",
+      "What is working capital and why does it matter?",
+      "Explain the relationship between the income statement, balance sheet, and cash flow statement."
+    ],
+    "mixed": [
+      "How would you evaluate whether a company is a good acquisition target?",
+      "Tell me about a financial model you built and the decisions it informed.",
+      "What do you look for in a company's financial statements to assess health?",
+      "How do you stay current with regulatory changes in finance?",
+      "Describe your approach to building a budget from scratch."
+    ]
+  }
+}

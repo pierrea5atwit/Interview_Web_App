@@ -1,0 +1,31 @@
+app = "interviewai-coach"
+primary_region = "ewr"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  TRANSCRIPTION_MODEL = "base"
+  BEST_RESPONSE_MIN_SCORE = "7.0"
+  HF_HUB_CACHE = "/app/data/.hf_cache"
+
+[http_service]
+  internal_port = 8501
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 10
+    soft_limit = 8
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "interviewai_data"
+  destination = "/app/data"

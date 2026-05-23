@@ -1,0 +1,28 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file: .env
+    volumes:
+      - ./data:/app/data          # persist best_responses.json
+      - whisper_cache:/root/.cache/huggingface  # cache downloaded model weights
+
+  # Optional: local Ollama for LLM scoring
+  # ollama:
+  #   image: ollama/ollama
+  #   ports:
+  #     - "11434:11434"
+  #   volumes:
+  #     - ollama_data:/root/.ollama
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - capabilities: [gpu]   # remove if no GPU
+
+volumes:
+  whisper_cache:
+  # ollama_data:

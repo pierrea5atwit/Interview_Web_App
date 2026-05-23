@@ -1,0 +1,38 @@
+# InterviewAI — MVP1.5 Requirements
+# Self-hosted Streamlit app | Local transcription + Ollama/HF scoring
+
+# ─────────────────────────────────────────────
+# UI FRAMEWORK
+# ─────────────────────────────────────────────
+streamlit>=1.39.0
+audio-recorder-streamlit>=0.0.8   # browser mic recording with silence auto-stop
+
+# ─────────────────────────────────────────────
+# SPEECH TRANSCRIPTION (local — no cloud API)
+# ─────────────────────────────────────────────
+faster-whisper>=1.0.0             # local Whisper inference (no OpenAI API)
+# Note: faster-whisper downloads model weights (~145 MB for 'base') on first use
+
+# ─────────────────────────────────────────────
+# LLM — SCORING ENGINE
+# ─────────────────────────────────────────────
+ollama>=0.3.0                     # local LLM client (requires Ollama running separately)
+huggingface-hub>=0.24.0           # HuggingFace Inference API fallback
+# transformers>=4.44.0            # optional: run HF models fully locally (needs CUDA for speed)
+
+# ─────────────────────────────────────────────
+# AUDIO UTILITIES
+# ─────────────────────────────────────────────
+numpy>=1.26.0                     # audio array ops
+
+# ─────────────────────────────────────────────
+# ENVIRONMENT & CONFIG
+# ─────────────────────────────────────────────
+python-dotenv>=1.0.1
+
+# ─────────────────────────────────────────────
+# TESTING
+# ─────────────────────────────────────────────
+pytest>=8.3.3
+pytest-asyncio>=0.24.0
+coverage>=7.6.1
