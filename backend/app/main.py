@@ -1,4 +1,6 @@
 """FastAPI backend for InterviewAI Coach."""
+import os
+import platform
 import sys
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from backend.app.services.responses import (
     save_best_response,
     delete_response,
     load_questions,
+    _RESPONSES_FILE,
 )
 from backend.app.services.scoring import score_response, overall_score, CATEGORIES
 from backend.app.services.transcription import transcribe_audio
@@ -29,12 +32,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_ENV_PATH = Path(__file__).parent.parent.parent / ".env"
+
 
 # ── Questions ──────────────────────────────────────────────────────────────────
 
 @app.get("/api/questions")
 def get_questions():
-    """Return the full question bank."""
     try:
         return load_questions()
     except Exception as e:
@@ -45,7 +49,6 @@ def get_questions():
 
 @app.post("/api/transcribe")
 async def transcribe(audio: UploadFile = File(...)):
-    """Accept a recorded audio file and return transcript + filler stats."""
     try:
         audio_bytes = await audio.read()
         transcript = transcribe_audio(audio_bytes)
@@ -64,7 +67,6 @@ class ScoreRequest(BaseModel):
 
 @app.post("/api/score")
 def score(req: ScoreRequest):
-    """Score a transcript across 5 categories. Tries Ollama → HF → rule-based."""
     try:
         scores = score_response(req.question, req.transcript)
         ov = overall_score(scores)
@@ -107,12 +109,133 @@ def create_best_response(req: SaveRequest):
     return {"ok": True}
 
 
+@app.delete("/api/best-responses/all")
+def delete_all_responses():
+    """Clear every saved response (danger zone)."""
+    try:
+        _RESPONSES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _RESPONSES_FILE.write_text("[]", encoding="utf-8")
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/api/best-responses/{response_id}")
 def delete_best_response(response_id: str):
     deleted = delete_response(response_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Response not found")
     return {"ok": True}
+
+
+# ── Settings ───────────────────────────────────────────────────────────────────
+
+def _read_env() -> dict:
+    from dotenv import dotenv_values
+    vals = dotenv_values(str(_ENV_PATH)) if _ENV_PATH.exists() else {}
+    return {
+        "transcription_model":    vals.get("TRANSCRIPTION_MODEL",       os.getenv("TRANSCRIPTION_MODEL", "base")),
+        "ollama_base_url":        vals.get("OLLAMA_BASE_URL",           os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")),
+        "ollama_model":           vals.get("OLLAMA_MODEL",              os.getenv("OLLAMA_MODEL", "llama3.2")),
+        "hf_token":               vals.get("HF_TOKEN",                  os.getenv("HF_TOKEN", "")),
+        "best_response_min_score":vals.get("BEST_RESPONSE_MIN_SCORE",  os.getenv("BEST_RESPONSE_MIN_SCORE", "7.0")),
+        "silence_threshold_seconds": vals.get("SILENCE_THRESHOLD_SECONDS", os.getenv("SILENCE_THRESHOLD_SECONDS", "5.0")),
+    }
+
+
+@app.get("/api/settings")
+def get_settings():
+    settings = _read_env()
+    settings["hf_token"] = "***" if settings["hf_token"] else ""
+    return settings
+
+
+class SettingsPayload(BaseModel):
+    transcription_model: str = "base"
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.2"
+    hf_token: str = ""
+    best_response_min_score: str = "7.0"
+    silence_threshold_seconds: str = "5.0"
+
+
+@app.post("/api/settings")
+def save_settings(payload: SettingsPayload):
+    try:
+        from dotenv import set_key
+        _ENV_PATH.touch(exist_ok=True)
+        mapping = {
+            "TRANSCRIPTION_MODEL":       payload.transcription_model,
+            "OLLAMA_BASE_URL":           payload.ollama_base_url,
+            "OLLAMA_MODEL":              payload.ollama_model,
+            "BEST_RESPONSE_MIN_SCORE":   payload.best_response_min_score,
+            "SILENCE_THRESHOLD_SECONDS": payload.silence_threshold_seconds,
+        }
+        if payload.hf_token and payload.hf_token != "***":
+            mapping["HF_TOKEN"] = payload.hf_token
+        for key, val in mapping.items():
+            set_key(str(_ENV_PATH), key, val)
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class OllamaTestRequest(BaseModel):
+    url: str
+    model: str
+
+
+@app.post("/api/settings/test-ollama")
+def test_ollama(req: OllamaTestRequest):
+    try:
+        import ollama
+        client = ollama.Client(host=req.url)
+        models = client.list()
+        names = [m.model for m in models.models]
+        model_found = req.model in names or any(req.model in n for n in names)
+        return {"ok": True, "model_found": model_found, "available_models": names[:8]}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+class HFTestRequest(BaseModel):
+    token: str
+
+
+@app.post("/api/settings/test-hf")
+def test_hf(req: HFTestRequest):
+    if not req.token:
+        raise HTTPException(status_code=400, detail="No token provided")
+    try:
+        from huggingface_hub import whoami
+        info = whoami(token=req.token)
+        return {"ok": True, "username": info["name"]}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+# ── System info ────────────────────────────────────────────────────────────────
+
+@app.get("/api/system-info")
+def system_info():
+    info = {
+        "python":   platform.python_version(),
+        "platform": f"{platform.system()} {platform.release()}",
+        "faster_whisper": False,
+        "ollama":         False,
+        "fastapi":        False,
+    }
+    for pkg, key in [
+        ("faster_whisper", "faster_whisper"),
+        ("ollama",         "ollama"),
+        ("fastapi",        "fastapi"),
+    ]:
+        try:
+            __import__(pkg)
+            info[key] = True
+        except ImportError:
+            pass
+    return info
 
 
 # ── Serve React SPA ────────────────────────────────────────────────────────────

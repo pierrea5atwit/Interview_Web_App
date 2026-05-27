@@ -1,8 +1,10 @@
 import { NavLink } from 'react-router-dom'
 
 const NAV = [
-  { to: '/',          icon: '🏠', label: 'Home' },
-  { to: '/practice',  icon: '🎙', label: 'Practice' },
+  { to: '/',               icon: '🏠', label: 'Home' },
+  { to: '/practice',       icon: '🎙', label: 'Practice' },
+  { to: '/best-responses', icon: '🏆', label: 'Best Responses' },
+  { to: '/settings',       icon: '⚙️', label: 'Settings' },
 ]
 
 export default function Sidebar() {
@@ -14,7 +16,7 @@ export default function Sidebar() {
       </div>
 
       {NAV.map(({ to, icon, label }) => (
-        <NavLink key={to} to={to} end>
+        <NavLink key={to} to={to} end={to === '/'}>
           {({ isActive }) => (
             <button className={`sidebar-nav-btn${isActive ? ' active' : ''}`}>
               {icon}&nbsp;&nbsp;{label}
