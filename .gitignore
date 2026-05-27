@@ -42,6 +42,7 @@ htmlcov/
 # Node (frontend build tools if added later)
 node_modules/
 dist/
+*.timestamp-*.mjs
 
 # Audio uploads (runtime)
 backend/app/uploads/
