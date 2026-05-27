@@ -4,11 +4,11 @@ services:
   app:
     build: .
     ports:
-      - "8501:8501"
+      - "7860:7860"
     env_file: .env
     volumes:
-      - ./data:/app/data          # persist best_responses.json
-      - whisper_cache:/root/.cache/huggingface  # cache downloaded model weights
+      - ./data:/app/data                              # persist best_responses.json
+      - whisper_cache:/root/.cache/huggingface        # cache downloaded model weights
 
   # Optional: local Ollama for LLM scoring
   # ollama:

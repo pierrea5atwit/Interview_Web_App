@@ -4,58 +4,40 @@
 Auth is deliberately excluded from MVP1.5. The app is self-hosted and single-user by default. The `auth/` directory exists as a placeholder.
 
 ## Why Excluded
-- Self-hosted Streamlit means controlled access via network (only local or VPN)
 - No persistent user data in MVP1.5 (best responses are per-device JSON)
-- Adding auth adds SQLAlchemy/JWT/bcrypt complexity without user-facing value yet
+- Adding auth adds JWT/bcrypt/session complexity without user-facing value yet
 
 ## Future Auth Design (when needed)
-**Approach:** Streamlit-native session cookies + SQLite (no PostgreSQL needed for single-team use)
+**Approach:** FastAPI session middleware + JWT tokens stored in HttpOnly cookies
 
-**Packages:**
+**Packages to add:**
 ```
-streamlit-authenticator>=0.3.0   # YAML-based user config
+python-jose[cryptography]   # JWT encoding/decoding
+passlib[bcrypt]             # password hashing
+python-multipart            # already in requirements (form login)
 ```
 
 **Pattern:**
 ```python
-import streamlit_authenticator as stauth
-import yaml
+# backend/app/auth.py
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
 
-with open("auth/users.yaml") as f:
-    config = yaml.safe_load(f)
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/token")
 
-authenticator = stauth.Authenticate(
-    config["credentials"],
-    config["cookie"]["name"],
-    config["cookie"]["key"],
-    config["cookie"]["expiry_days"],
-)
-
-name, auth_status, username = authenticator.login("Login", "main")
-if auth_status is False:
-    st.error("Username/password incorrect")
-    st.stop()
-elif auth_status is None:
-    st.warning("Please enter credentials")
-    st.stop()
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        username = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401)
+        return username
+    except JWTError:
+        raise HTTPException(status_code=401)
 ```
 
-**User config (`auth/users.yaml`):**
-```yaml
-credentials:
-  usernames:
-    jsmith:
-      email: jsmith@example.com
-      name: John Smith
-      password: $2b$12$hashed...   # bcrypt
-cookie:
-  expiry_days: 30
-  key: some-random-key
-  name: interviewai_auth
-```
+**React side:** store JWT in memory (not localStorage), attach as `Authorization: Bearer <token>` header on each API call, redirect to `/login` on 401.
 
 ## Per-User Best Responses
 When auth is added, `data/best_responses.json` should become `data/{username}_responses.json` or migrate to SQLite with a `user_id` column.
-
-## Old FastAPI Auth (reference)
-The previous implementation used JWT + bcrypt + PostgreSQL. That code was deleted in the MVP1.5 refactor. See git history if needed.

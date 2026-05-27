@@ -10,7 +10,7 @@ primary_region = "ewr"
   HF_HUB_CACHE = "/app/data/.hf_cache"
 
 [http_service]
-  internal_port = 8501
+  internal_port = 7860
   force_https = true
   auto_stop_machines = true
   auto_start_machines = true
