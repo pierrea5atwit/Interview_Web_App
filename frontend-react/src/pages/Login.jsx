@@ -1,22 +1,25 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
+import { supabasePromise } from '../lib/supabase'
 
 export default function Login() {
-  const { signIn, signUp, configured } = useAuth()
-  const [mode, setMode]       = useState('login') // 'login' | 'signup'
-  const [email, setEmail]     = useState('')
+  const { signIn, signUp } = useAuth()
+  const [mode, setMode]         = useState('login')
+  const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
-  const [status, setStatus]   = useState(null) // { type, message }
-  const [busy, setBusy]       = useState(false)
+  const [status, setStatus]     = useState(null)
+  const [busy, setBusy]         = useState(false)
+  const [noSupabase, setNoSupabase] = useState(false)
+
+  // Check once whether Supabase is configured
+  supabasePromise.then(sb => { if (!sb) setNoSupabase(true) })
 
   async function handleSubmit(e) {
     e.preventDefault()
-    setBusy(true)
-    setStatus(null)
-
+    setBusy(true); setStatus(null)
     const fn = mode === 'login' ? signIn : signUp
+    if (!fn) { setStatus({ type: 'error', message: 'Auth not configured.' }); setBusy(false); return }
     const { error } = await fn(email, password)
-
     if (error) {
       setStatus({ type: 'error', message: error.message })
     } else if (mode === 'signup') {
@@ -25,16 +28,13 @@ export default function Login() {
     setBusy(false)
   }
 
-  if (!configured) {
+  if (noSupabase) {
     return (
       <div className="login-shell">
         <div className="login-card">
           <div className="sidebar-brand-name" style={{ marginBottom: 6 }}>InterviewAI</div>
-          <p style={{ color: 'var(--muted)', fontSize: '0.88rem', marginBottom: 16 }}>
-            Supabase is not configured. Running in guest mode.
-          </p>
           <div className="alert alert-warning">
-            Set <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> to enable accounts.
+            Supabase is not configured. Set <code>SUPABASE_URL</code> and <code>SUPABASE_ANON_KEY</code> in your Space secrets to enable accounts.
           </div>
         </div>
       </div>
@@ -60,35 +60,15 @@ export default function Login() {
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div>
             <label htmlFor="email">Email</label>
-            <input
-              id="email"
-              type="email"
-              value={email}
-              onChange={e => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              required
-              className="login-input"
-            />
+            <input id="email" type="email" value={email} onChange={e => setEmail(e.target.value)}
+              placeholder="you@example.com" required className="login-input" />
           </div>
           <div>
             <label htmlFor="password">Password</label>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={e => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-              minLength={6}
-              className="login-input"
-            />
+            <input id="password" type="password" value={password} onChange={e => setPassword(e.target.value)}
+              placeholder="••••••••" required minLength={6} className="login-input" />
           </div>
-          <button
-            type="submit"
-            className="btn btn-primary btn-full"
-            disabled={busy}
-            style={{ marginTop: 4 }}
-          >
+          <button type="submit" className="btn btn-primary btn-full" disabled={busy} style={{ marginTop: 4 }}>
             {busy
               ? <><span className="spinner" style={{ marginRight: 8 }} />{mode === 'login' ? 'Signing in…' : 'Creating account…'}</>
               : mode === 'login' ? 'Sign in' : 'Create account'
@@ -98,10 +78,8 @@ export default function Login() {
 
         <div style={{ textAlign: 'center', marginTop: 18, fontSize: '0.85rem', color: 'var(--muted)' }}>
           {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
-          <button
-            onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setStatus(null) }}
-            style={{ background: 'none', border: 'none', color: 'var(--accent)', fontWeight: 600, cursor: 'pointer' }}
-          >
+          <button onClick={() => { setMode(mode === 'login' ? 'signup' : 'login'); setStatus(null) }}
+            style={{ background: 'none', border: 'none', color: 'var(--accent)', fontWeight: 600, cursor: 'pointer' }}>
             {mode === 'login' ? 'Sign up' : 'Sign in'}
           </button>
         </div>

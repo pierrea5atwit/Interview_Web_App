@@ -1,28 +1,31 @@
 # InterviewAI Coach — Requirements
-# React + FastAPI + faster-whisper + Ollama/HF scoring
 
 # ─────────────────────────────────────────────
 # API FRAMEWORK
 # ─────────────────────────────────────────────
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-python-multipart>=0.0.9          # required for file upload (transcription)
+python-multipart>=0.0.9
 
 # ─────────────────────────────────────────────
 # SPEECH TRANSCRIPTION (local)
 # ─────────────────────────────────────────────
-faster-whisper>=1.0.0             # local Whisper inference (no OpenAI API)
-# Downloads model weights on first use: ~75 MB (tiny) to ~1.5 GB (medium)
+faster-whisper>=1.0.0
 
 # ─────────────────────────────────────────────
 # LLM — SCORING ENGINE
 # ─────────────────────────────────────────────
-huggingface-hub>=0.24.0           # HuggingFace Inference API fallback
+# HF serverless API (used when HF_TOKEN is set)
+huggingface-hub>=0.24.0
+# Local inference — openbmb/MiniCPM5-1B runs on CPU, ~2 GB RAM
+# torch is installed as CPU-only in the Dockerfile to keep the image lean
+transformers>=5.6.0
+accelerate>=0.34.0
 
 # ─────────────────────────────────────────────
 # AUDIO UTILITIES
 # ─────────────────────────────────────────────
-numpy>=1.26.0                     # audio array ops
+numpy>=1.26.0
 
 # ─────────────────────────────────────────────
 # ENVIRONMENT & CONFIG

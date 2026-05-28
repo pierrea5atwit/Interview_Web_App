@@ -1,29 +1,26 @@
--- ============================================================
--- InterviewAI Coach — Supabase Schema
--- Run this in your Supabase project: SQL Editor → New query
--- ============================================================
+-- InterviewAI Coach — Supabase schema
+-- Run this in your Supabase project: Dashboard → SQL Editor → New Query
 
--- ── Questions ─────────────────────────────────────────────────
+-- ── Questions table ────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS questions (
-  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  role          TEXT        NOT NULL,
-  type          TEXT        NOT NULL CHECK (type IN ('behavioral', 'technical', 'mixed')),
-  difficulty    INT         NOT NULL DEFAULT 1 CHECK (difficulty IN (0, 1, 2)),
-  question_text TEXT        NOT NULL,
-  created_at    TIMESTAMPTZ DEFAULT NOW()
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  role         TEXT,
+  type         TEXT CHECK (type IN ('behavioral', 'technical', 'mixed')),
+  difficulty   INT  CHECK (difficulty IN (0, 1, 2)),  -- 0=easy 1=medium 2=hard
+  question_text TEXT,
+  created_at   TIMESTAMPTZ DEFAULT NOW()
 );
 
--- difficulty: 0 = easy | 1 = medium | 2 = hard
-
-CREATE INDEX IF NOT EXISTS idx_questions_role_type ON questions (role, type);
-CREATE INDEX IF NOT EXISTS idx_questions_difficulty  ON questions (difficulty);
-
--- ── Responses ─────────────────────────────────────────────────
+-- ── Responses table ────────────────────────────────────────────────────────────
+-- question_id is stored for reference but has NO FK constraint —
+-- questions are bundled in the frontend so the questions table is optional.
+-- question_text is stored directly so responses are self-contained.
 CREATE TABLE IF NOT EXISTS responses (
-  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id       UUID        NOT NULL,
-  question_id   UUID        NOT NULL REFERENCES questions (id) ON DELETE SET NULL,
-  transcript    TEXT        NOT NULL,
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id       UUID NOT NULL,
+  question_id   TEXT,          -- deterministic ID from frontend; no FK
+  question_text TEXT,          -- stored inline so no join needed
+  transcript    TEXT,
   clarity       FLOAT,
   conciseness   FLOAT,
   structure     FLOAT,
@@ -32,28 +29,29 @@ CREATE TABLE IF NOT EXISTS responses (
   overall_score FLOAT,
   suggestion    TEXT,
   encouragement TEXT,
-  filler_count  INT         DEFAULT 0,
-  filler_rate   FLOAT       DEFAULT 0.0,
+  filler_count  INT   DEFAULT 0,
+  filler_rate   FLOAT DEFAULT 0.0,
   created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_responses_user_id ON responses (user_id);
+-- ── Row Level Security ─────────────────────────────────────────────────────────
+ALTER TABLE questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE responses ENABLE ROW LEVEL SECURITY;
 
--- ── Row-Level Security ─────────────────────────────────────────
--- Enable RLS on both tables
-ALTER TABLE questions  ENABLE ROW LEVEL SECURITY;
-ALTER TABLE responses  ENABLE ROW LEVEL SECURITY;
+-- Questions: anyone can read
+CREATE POLICY "questions_select_all" ON questions
+  FOR SELECT USING (true);
 
--- Anyone can read questions (public question bank)
-CREATE POLICY "questions_read_all"
-  ON questions FOR SELECT USING (true);
+-- Responses: users can only see and modify their own rows
+CREATE POLICY "responses_insert_own" ON responses
+  FOR INSERT WITH CHECK (auth.uid() = user_id);
 
--- Users can only read/write their own responses (MVP: permissive insert)
-CREATE POLICY "responses_insert_any"
-  ON responses FOR INSERT WITH CHECK (true);
+CREATE POLICY "responses_select_own" ON responses
+  FOR SELECT USING (auth.uid() = user_id);
 
-CREATE POLICY "responses_read_own"
-  ON responses FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "responses_delete_own" ON responses
+  FOR DELETE USING (auth.uid() = user_id);
 
-CREATE POLICY "responses_delete_own"
-  ON responses FOR DELETE USING (auth.uid() = user_id);
+-- ── Indexes ────────────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS responses_user_id_idx  ON responses (user_id);
+CREATE INDEX IF NOT EXISTS responses_created_at_idx ON responses (created_at DESC);

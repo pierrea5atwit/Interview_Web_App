@@ -13,10 +13,14 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps: ffmpeg for audio conversion (used by faster-whisper)
+# System deps: ffmpeg for audio conversion
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
 
-# Python deps
+# Install CPU-only PyTorch first — avoids pulling the full CUDA wheel (~800 MB)
+# when requirements.txt is processed later.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Remaining Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
