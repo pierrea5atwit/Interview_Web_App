@@ -1,41 +1,68 @@
-import { createContext, useContext, useEffect, useState } from 'react'
-import { supabase } from '../lib/supabase'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { supabasePromise } from '../lib/supabase'
 
 const AuthContext = createContext(null)
 
 export function AuthProvider({ children }) {
-  const [session, setSession] = useState(undefined) // undefined = loading
+  // undefined = still resolving, null = resolved (no session), object = signed in
+  const [session,    setSession]    = useState(undefined)
+  // true once the Supabase client resolves to a non-null value
+  const [configured, setConfigured] = useState(false)
+
+  // Store the resolved client so signIn/signUp/signOut can reference it
+  // synchronously without the promise chain
+  const sbRef = useRef(null)
 
   useEffect(() => {
-    if (!supabase) {
-      // Supabase not configured — treat as unauthenticated (guest mode)
-      setSession(null)
-      return
-    }
+    let sub = null
 
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session ?? null)
+    supabasePromise.then(sb => {
+      sbRef.current = sb
+      setConfigured(!!sb)
+
+      if (!sb) {
+        // Supabase not configured — guest mode
+        setSession(null)
+        return
+      }
+
+      // Hydrate session from existing cookie/token
+      sb.auth.getSession().then(({ data }) => {
+        setSession(data.session ?? null)
+      })
+
+      // Keep session in sync with Supabase auth state changes
+      const { data: { subscription } } = sb.auth.onAuthStateChange((_event, s) => {
+        setSession(s ?? null)
+      })
+      sub = subscription
     })
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s ?? null)
-    })
-
-    return () => subscription.unsubscribe()
+    // Cleanup: unsubscribe when the component unmounts
+    return () => sub?.unsubscribe()
   }, [])
 
-  const signIn = (email, password) =>
-    supabase.auth.signInWithPassword({ email, password })
+  const signIn  = (email, password) =>
+    sbRef.current?.auth.signInWithPassword({ email, password })
 
-  const signUp = (email, password) =>
-    supabase.auth.signUp({ email, password })
+  const signUp  = (email, password) =>
+    sbRef.current?.auth.signUp({ email, password })
 
-  const signOut = () => supabase.auth.signOut()
+  const signOut = () =>
+    sbRef.current?.auth.signOut()
 
   const user = session?.user ?? null
 
   return (
-    <AuthContext.Provider value={{ session, user, signIn, signUp, signOut, loading: session === undefined }}>
+    <AuthContext.Provider value={{
+      session,
+      user,
+      signIn,
+      signUp,
+      signOut,
+      configured,                      // true = Supabase is live; false = guest mode
+      loading: session === undefined,  // true while /api/config is still resolving
+    }}>
       {children}
     </AuthContext.Provider>
   )

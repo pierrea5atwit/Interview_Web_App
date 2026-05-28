@@ -32,6 +32,23 @@ app.add_middleware(
 _ENV_PATH = Path(__file__).parent.parent.parent / ".env"
 
 
+# ── Public runtime config ──────────────────────────────────────────────────────
+
+@app.get("/api/config")
+def get_config():
+    """
+    Return the subset of env vars the React frontend needs at runtime.
+
+    Only the Supabase *public* keys are exposed here — they are designed to
+    be visible in the browser (Row-Level Security enforces access control).
+    Sensitive keys (HF_TOKEN, service-role key, etc.) are never returned.
+    """
+    return {
+        "supabase_url":      os.getenv("SUPABASE_URL", ""),
+        "supabase_anon_key": os.getenv("SUPABASE_ANON_KEY", ""),
+    }
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _question_id(text: str) -> str:

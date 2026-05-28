@@ -1,9 +1,8 @@
 import { useState } from 'react'
 import { useAuth } from '../context/AuthContext'
-import { supabase } from '../lib/supabase'
 
 export default function Login() {
-  const { signIn, signUp } = useAuth()
+  const { signIn, signUp, configured } = useAuth()
   const [mode, setMode]       = useState('login') // 'login' | 'signup'
   const [email, setEmail]     = useState('')
   const [password, setPassword] = useState('')
@@ -26,7 +25,7 @@ export default function Login() {
     setBusy(false)
   }
 
-  if (!supabase) {
+  if (!configured) {
     return (
       <div className="login-shell">
         <div className="login-card">
