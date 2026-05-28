@@ -332,4 +332,4 @@ def delete_all_responses(user_id: str = Query(...)):
     """Delete every response belonging to a user."""
     db = get_client()
     if not db:
-        raise HTTPException(status
+        raise HTTPException(status)
