@@ -8,7 +8,7 @@ import { createClient } from '@supabase/supabase-js'
 // Returns a Promise<SupabaseClient | null>.
 // null means Supabase isn't configured (guest mode — app still works, no auth).
 
-let _cached = null
+let _cached = undefined  // undefined = not yet resolved; null = guest mode; client = live
 
 export const supabasePromise = (async () => {
   if (_cached !== undefined) return _cached
@@ -42,4 +42,4 @@ export const supabasePromise = (async () => {
 // Synchronous accessor — null until the promise resolves.
 // Use supabasePromise.then() in effects, or await it in async contexts.
 export let supabase = null
-supabasePromise.then(sb => { supabase = sb })
+supabasePromise.then(sb => { supabase = sb ?? null })

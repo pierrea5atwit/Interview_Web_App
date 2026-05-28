@@ -1,29 +1,74 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import { useAuth } from '../context/AuthContext'
+import localQuestions from '../data/questions.json'
+
+// ── Constants ──────────────────────────────────────────────────────────────────
 
 const CATEGORIES = ['clarity', 'conciseness', 'structure', 'confidence', 'relevance']
 const SILENCE_SECONDS = 5
 
-const ROLES = [
-  { value: 'software_engineering', label: 'Software Engineering' },
-  { value: 'marketing',            label: 'Marketing' },
-  { value: 'finance',              label: 'Finance' },
-  { value: 'product_management',   label: 'Product Management' },
-  { value: 'data_science',         label: 'Data Science' },
+// Roles derived from the bundled JSON — always in sync, no duplication
+const ROLES = Object.keys(localQuestions).map(key => ({
+  value: key,
+  label: key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+}))
+
+// Difficulty maps to question type internally; integers never shown in UI
+const DIFFICULTIES = [
+  { value: 'all',    label: 'All Difficulties', type: null },
+  { value: 'easy',   label: 'Easy',             type: 'behavioral' },
+  { value: 'medium', label: 'Medium',           type: 'mixed'      },
+  { value: 'hard',   label: 'Hard',             type: 'technical'  },
 ]
 
-const TYPES = [
-  { value: 'behavioral', label: 'Behavioral' },
-  { value: 'technical',  label: 'Technical' },
-  { value: 'mixed',      label: 'Mixed' },
-]
+const DIFF_PILL = { behavioral: 'pill-green', mixed: 'pill-amber', technical: 'pill-red' }
+const DIFF_LABEL = { behavioral: 'Easy', mixed: 'Medium', technical: 'Hard' }
 
+// ── On-click question fetch ────────────────────────────────────────────────────
+// Tries GET /api/questions first (may return richer Supabase data),
+// falls back to the bundled JSON silently.
+async function fetchOneQuestion(role, difficultyValue) {
+  const diff = DIFFICULTIES.find(d => d.value === difficultyValue)
+  const type = diff?.type  // null = all types
+
+  // Build candidate list from bundled JSON (instant, always available)
+  const roleData = localQuestions[role] ?? {}
+  let candidates = []
+  for (const [qtype, texts] of Object.entries(roleData)) {
+    if (!type || qtype === type) {
+      texts.forEach((text, i) => {
+        candidates.push({ id: `${role}__${qtype}__${i}`, question_text: text, type: qtype })
+      })
+    }
+  }
+
+  // Try to get a fresh list from the API (may have more questions from Supabase)
+  try {
+    const types = type ? [type] : Object.keys(roleData)
+    const results = await Promise.all(
+      types.map(t => fetch(`/api/questions?role=${role}&type=${t}`).then(r => r.ok ? r.json() : []))
+    )
+    const apiItems = results.flat().filter(q => q?.question_text)
+    if (apiItems.length > 0) {
+      // Annotate with type if missing (API may not return it)
+      candidates = results.flatMap((items, i) =>
+        items.map(q => ({ ...q, type: types[i] }))
+      ).filter(q => q?.question_text)
+    }
+  } catch {
+    // API unavailable — use bundled candidates already set above
+  }
+
+  if (!candidates.length) return null
+  return candidates[Math.floor(Math.random() * candidates.length)]
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
 function pillClass(score) {
   if (score >= 7) return 'pill-green'
   if (score >= 5) return 'pill-amber'
   return 'pill-red'
 }
-
 function scoreClass(score) {
   if (score >= 7) return 'score-green'
   if (score >= 5) return 'score-amber'
@@ -32,30 +77,27 @@ function scoreClass(score) {
 
 // ── Audio recorder hook ────────────────────────────────────────────────────────
 function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
-  const [status, setStatus]    = useState('idle')
-  const mediaRef   = useRef(null)
-  const chunksRef  = useRef([])
-  const rafRef     = useRef(null)
+  const [status, setStatus] = useState('idle')
+  const mediaRef  = useRef(null)
+  const chunksRef = useRef([])
+  const rafRef    = useRef(null)
 
   const stopRecording = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
-    if (mediaRef.current && mediaRef.current.state !== 'inactive') {
-      mediaRef.current.stop()
-    }
+    if (mediaRef.current && mediaRef.current.state !== 'inactive') mediaRef.current.stop()
   }, [])
 
   const startRecording = useCallback(async () => {
     chunksRef.current = []
     setStatus('recording')
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const stream   = await navigator.mediaDevices.getUserMedia({ audio: true })
     const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
       ? 'audio/webm;codecs=opus' : 'audio/webm'
     const recorder = new MediaRecorder(stream, { mimeType })
     mediaRef.current = recorder
 
-    const ctx      = new AudioContext()
-    const source   = ctx.createMediaStreamSource(stream)
+    const ctx = new AudioContext()
+    const source = ctx.createMediaStreamSource(stream)
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 512
     source.connect(analyser)
@@ -67,9 +109,7 @@ function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
       const rms = data.reduce((s, v) => s + v, 0) / data.length
       if (rms < 5) {
         if (!silenceSince) silenceSince = Date.now()
-        else if (Date.now() - silenceSince > silenceSeconds * 1000) {
-          stopRecording(); return
-        }
+        else if (Date.now() - silenceSince > silenceSeconds * 1000) { stopRecording(); return }
       } else { silenceSince = null }
       rafRef.current = requestAnimationFrame(checkSilence)
     }
@@ -89,13 +129,16 @@ function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
 }
 
 // ── ScorePanel ─────────────────────────────────────────────────────────────────
-function ScorePanel({ result, questionId, question, transcript, filler, userId, minScore = 7.0 }) {
+function ScorePanel({ result, currentQ, transcript, filler, userId, minScore = 7.0 }) {
   const [saved,   setSaved]   = useState(false)
   const [saving,  setSaving]  = useState(false)
   const [saveErr, setSaveErr] = useState(null)
 
-  // Reset saved state when result changes
-  useEffect(() => { setSaved(false); setSaveErr(null) }, [result])
+  const resultRef = useRef(null)
+  if (resultRef.current !== result) {
+    resultRef.current = result
+    if (saved || saveErr) { setSaved(false); setSaveErr(null) }
+  }
 
   if (!result) {
     return (
@@ -110,33 +153,29 @@ function ScorePanel({ result, questionId, question, transcript, filler, userId, 
 
   async function handleSave() {
     if (!userId) { setSaveErr('Sign in to save responses.'); return }
-    if (!questionId) { setSaveErr('No question ID — cannot save.'); return }
     setSaving(true); setSaveErr(null)
     try {
-      const body = {
-        user_id:       userId,
-        question_id:   questionId,
-        transcript,
-        clarity:       result.clarity,
-        conciseness:   result.conciseness,
-        structure:     result.structure,
-        confidence:    result.confidence,
-        relevance:     result.relevance,
-        overall_score: ov,
-        suggestion:    result.suggestion    ?? '',
-        encouragement: result.encouragement ?? '',
-        filler_count:  filler?.filler_count ?? 0,
-        filler_rate:   filler?.filler_rate  ?? 0.0,
-      }
       const res = await fetch('/api/responses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          user_id:       userId,
+          question_id:   currentQ?.id   ?? '',
+          question_text: currentQ?.question_text ?? '',
+          transcript,
+          clarity:       result.clarity,
+          conciseness:   result.conciseness,
+          structure:     result.structure,
+          confidence:    result.confidence,
+          relevance:     result.relevance,
+          overall_score: ov,
+          suggestion:    result.suggestion    ?? '',
+          encouragement: result.encouragement ?? '',
+          filler_count:  filler?.filler_count ?? 0,
+          filler_rate:   filler?.filler_rate  ?? 0.0,
+        }),
       })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.detail || 'Save failed')
-      }
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || 'Save failed')
       setSaved(true)
     } catch (e) {
       setSaveErr(e.message)
@@ -145,26 +184,20 @@ function ScorePanel({ result, questionId, question, transcript, filler, userId, 
 
   return (
     <div>
-      {/* Overall ring */}
       <div className={`score-ring ${scoreClass(ov)}`}>
-        {ov.toFixed(1)}
-        <small>Overall</small>
+        {ov.toFixed(1)}<small>Overall</small>
       </div>
       <p style={{ textAlign: 'center', color: 'var(--muted-2)', fontSize: '0.78rem', marginTop: -6, marginBottom: 16 }}>
         scored by <code>{result.scorer || '?'}</code>
       </p>
-
       <hr />
 
-      {/* Category bars */}
       {CATEGORIES.map(cat => {
         const val = result[cat] ?? 0
         return (
           <div key={cat} style={{ marginBottom: 10 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-              <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
-                {cat.charAt(0).toUpperCase() + cat.slice(1)}
-              </span>
+              <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{cat.charAt(0).toUpperCase() + cat.slice(1)}</span>
               <span className={`pill ${pillClass(val)}`}>{val}/10</span>
             </div>
             <div className="progress-bar-track">
@@ -174,7 +207,6 @@ function ScorePanel({ result, questionId, question, transcript, filler, userId, 
         )
       })}
 
-      {/* Suggestion */}
       {result.suggestion && (
         <>
           <hr />
@@ -186,8 +218,6 @@ function ScorePanel({ result, questionId, question, transcript, filler, userId, 
           </div>
         </>
       )}
-
-      {/* Encouragement */}
       {result.encouragement && (
         <div className="card" style={{ borderLeft: '3px solid var(--green)', fontSize: '0.92rem', lineHeight: 1.6 }}>
           <span style={{ color: 'var(--green)', fontWeight: 700, fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
@@ -197,7 +227,6 @@ function ScorePanel({ result, questionId, question, transcript, filler, userId, 
         </div>
       )}
 
-      {/* Save CTA */}
       <hr />
       {saveErr && <div className="alert alert-error" style={{ marginBottom: 8 }}>{saveErr}</div>}
       {ov >= minScore && !saved && (
@@ -210,9 +239,7 @@ function ScorePanel({ result, questionId, question, transcript, filler, userId, 
       )}
       {saved && <div className="alert alert-success">✅ Saved to your Best Responses.</div>}
       {!saved && ov < minScore && (
-        <p className="caption" style={{ textAlign: 'center' }}>
-          Score {minScore.toFixed(1)}+ to save. Current: {ov.toFixed(1)}. Keep going!
-        </p>
+        <p className="caption" style={{ textAlign: 'center' }}>Score {minScore.toFixed(1)}+ to save. Current: {ov.toFixed(1)}. Keep going!</p>
       )}
     </div>
   )
@@ -224,8 +251,8 @@ function FillerMetrics({ filler }) {
   return (
     <div className="grid-3" style={{ marginTop: 12 }}>
       {[
-        { num: filler.total_words,                       label: 'Words' },
-        { num: filler.filler_count,                      label: 'Fillers' },
+        { num: filler.total_words,                         label: 'Words' },
+        { num: filler.filler_count,                        label: 'Fillers' },
         { num: `${(filler.filler_rate ?? 0).toFixed(1)}%`, label: 'Filler Rate' },
       ].map(({ num, label }) => (
         <div key={label} className="stat-block" style={{ padding: 12 }}>
@@ -240,12 +267,20 @@ function FillerMetrics({ filler }) {
 // ── Practice page ──────────────────────────────────────────────────────────────
 export default function Practice() {
   const { user } = useAuth()
+  const [minScore, setMinScore] = useState(7.0)
+
+  // Load runtime config (best_response_min_score may differ from default 7.0)
+  useState(() => {
+    fetch('/api/config').then(r => r.ok ? r.json() : {}).then(cfg => {
+      if (cfg.best_response_min_score) setMinScore(cfg.best_response_min_score)
+    }).catch(() => {})
+  })
 
   const [role,         setRole]         = useState(ROLES[0].value)
-  const [itype,        setItype]        = useState(TYPES[0].value)
-  const [pool,         setPool]         = useState([])   // [{id, question_text}]
-  const [poolLoading,  setPoolLoading]  = useState(false)
-  const [currentQ,     setCurrentQ]     = useState(null) // {id, question_text}
+  const [difficulty,   setDifficulty]   = useState('all')
+  const [currentQ,     setCurrentQ]     = useState(null)
+  const [fetching,     setFetching]     = useState(false)
+  const [fetchErr,     setFetchErr]     = useState(null)
   const [audioURL,     setAudioURL]     = useState(null)
   const [transcript,   setTranscript]   = useState('')
   const [filler,       setFiller]       = useState(null)
@@ -253,31 +288,28 @@ export default function Practice() {
   const [scoring,      setScoring]      = useState(false)
   const [result,       setResult]       = useState(null)
 
-  // Fetch questions when role or type changes
-  useEffect(() => {
-    setPool([]); setCurrentQ(null); setResult(null)
-    setPoolLoading(true)
-    fetch(`/api/questions?role=${role}&type=${itype}`)
-      .then(r => r.json())
-      .then(data => setPool(Array.isArray(data) ? data : []))
-      .catch(() => setPool([]))
-      .finally(() => setPoolLoading(false))
-  }, [role, itype])
-
-  function newQuestion() {
-    if (!pool.length) return
-    const q = pool[Math.floor(Math.random() * pool.length)]
-    setCurrentQ(q)
+  // ── New Question — fetches on click ─────────────────────────────────────────
+  async function handleNewQuestion() {
+    setFetching(true); setFetchErr(null)
     setAudioURL(null); setTranscript(''); setFiller(null); setResult(null)
+    try {
+      const q = await fetchOneQuestion(role, difficulty)
+      if (!q) throw new Error(`No questions found for ${role} / ${difficulty}`)
+      setCurrentQ(q)
+    } catch (e) {
+      setFetchErr(e.message)
+      setCurrentQ(null)
+    } finally { setFetching(false) }
   }
 
+  // ── Recording ────────────────────────────────────────────────────────────────
   const handleStop = useCallback(async (blob) => {
     setAudioURL(URL.createObjectURL(blob))
     setTranscript(''); setFiller(null); setResult(null)
     setTranscribing(true)
     try {
       const fd = new FormData()
-      fd.append('file', blob, 'recording.webm')  // field name: 'file' per API spec
+      fd.append('file', blob, 'recording.webm')
       const res  = await fetch('/api/transcribe', { method: 'POST', body: fd })
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
@@ -290,6 +322,7 @@ export default function Practice() {
 
   const { status: recStatus, startRecording, stopRecording } = useAudioRecorder({ onStop: handleStop })
 
+  // ── Scoring ──────────────────────────────────────────────────────────────────
   async function scoreResponse() {
     if (!currentQ || !transcript) return
     setScoring(true)
@@ -299,11 +332,18 @@ export default function Practice() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: currentQ.question_text, transcript }),
       })
-      const data = await res.json()
-      setResult(data)
+      if (!res.ok) {
+        const detail = await res.json().then(j => j.detail ?? res.statusText).catch(() => res.statusText)
+        throw new Error(detail)
+      }
+      setResult(await res.json())
     } catch (e) { alert('Scoring failed: ' + e.message) }
     finally { setScoring(false) }
   }
+
+  const roleLabel = ROLES.find(r => r.value === role)?.label ?? role
+  const qDiff     = currentQ ? DIFF_LABEL[currentQ.type]  ?? '' : ''
+  const qPill     = currentQ ? DIFF_PILL[currentQ.type]   ?? 'pill-green' : ''
 
   return (
     <>
@@ -315,45 +355,48 @@ export default function Practice() {
         </div>
       </div>
 
-      {/* Setup controls */}
+      {/* Controls */}
       <div style={{ display: 'flex', gap: 16, marginBottom: 20, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div style={{ flex: '1 1 160px' }}>
           <label>Role</label>
-          <select value={role} onChange={e => setRole(e.target.value)}>
+          <select value={role} onChange={e => { setRole(e.target.value); setCurrentQ(null); setResult(null) }}>
             {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select>
         </div>
-        <div style={{ flex: '1 1 140px' }}>
-          <label>Interview Type</label>
-          <select value={itype} onChange={e => setItype(e.target.value)}>
-            {TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+        <div style={{ flex: '1 1 160px' }}>
+          <label>Difficulty</label>
+          <select value={difficulty} onChange={e => { setDifficulty(e.target.value); setCurrentQ(null); setResult(null) }}>
+            {DIFFICULTIES.map(d => <option key={d.value} value={d.value}>{d.label}</option>)}
           </select>
         </div>
-        <button className="btn btn-primary" onClick={newQuestion} disabled={!pool.length || poolLoading}>
-          {poolLoading ? <><span className="spinner" />&nbsp;Loading…</> : '🎲 New Question'}
+        <button className="btn btn-primary" onClick={handleNewQuestion} disabled={fetching}>
+          {fetching
+            ? <><span className="spinner" />&nbsp; Loading…</>
+            : currentQ ? '🔀 Next Question' : '🎲 New Question'}
         </button>
       </div>
+
+      {/* Error state */}
+      {fetchErr && <div className="alert alert-error" style={{ marginBottom: 12 }}>{fetchErr}</div>}
 
       {/* Question card */}
       {currentQ ? (
         <>
           <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-            <span className="pill pill-green">
-              {ROLES.find(r => r.value === role)?.label ?? role}
-            </span>
-            <span className="pill pill-amber">
-              {TYPES.find(t => t.value === itype)?.label ?? itype}
-            </span>
+            <span className="pill pill-green">{roleLabel}</span>
+            <span className={`pill ${qPill}`}>{qDiff}</span>
           </div>
           <div className="question-card">{currentQ.question_text}</div>
         </>
-      ) : (
+      ) : !fetchErr && (
         <div style={{
           background: 'rgba(99,102,241,0.07)', border: '1px dashed rgba(99,102,241,0.3)',
           borderRadius: 12, padding: 24, textAlign: 'center',
         }}>
           <div style={{ fontSize: '2rem', marginBottom: 8 }}>🎲</div>
-          <div style={{ color: 'var(--muted)' }}>Click <strong>New Question</strong> to get started</div>
+          <div style={{ color: 'var(--muted)' }}>
+            Pick a role and difficulty, then click <strong>New Question</strong>
+          </div>
         </div>
       )}
 
@@ -371,9 +414,9 @@ export default function Practice() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
             {recStatus === 'recording' ? (
-              <button className="mic-btn recording" onClick={stopRecording} title="Stop recording">🛑</button>
+              <button className="mic-btn recording" onClick={stopRecording}>🛑</button>
             ) : (
-              <button className="mic-btn idle" onClick={startRecording} disabled={transcribing} title="Start recording">🎙</button>
+              <button className="mic-btn idle" onClick={startRecording} disabled={transcribing}>🎙</button>
             )}
             {recStatus === 'recording' && (
               <span style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>
@@ -392,26 +435,14 @@ export default function Practice() {
           {transcript && !transcribing && (
             <>
               <div className="section-title" style={{ margin: '16px 0 8px' }}>📝 Transcript</div>
-              <textarea
-                rows={6}
-                value={transcript}
-                onChange={e => setTranscript(e.target.value)}
-                style={{ resize: 'vertical' }}
-              />
-
+              <textarea rows={6} value={transcript} onChange={e => setTranscript(e.target.value)}
+                style={{ resize: 'vertical' }} />
               <FillerMetrics filler={filler} />
-
               <div style={{ height: 16 }} />
-
               {!result && (
-                <button
-                  className="btn btn-primary btn-full"
-                  onClick={scoreResponse}
-                  disabled={scoring || !currentQ}
-                >
-                  {scoring
-                    ? <><span className="spinner" />&nbsp; Analysing…</>
-                    : '📊 Score My Response'}
+                <button className="btn btn-primary btn-full" onClick={scoreResponse}
+                  disabled={scoring || !currentQ}>
+                  {scoring ? <><span className="spinner" />&nbsp; Analysing…</> : '📊 Score My Response'}
                 </button>
               )}
             </>
@@ -420,7 +451,7 @@ export default function Practice() {
           <div className="hint-box" style={{ marginTop: 20 }}>
             🎙 Auto-stops after <strong>5s silence</strong><br />
             📝 Edit transcript before scoring if needed<br />
-            🏆 Score 7.0+ to save a response
+            🟢 Easy &nbsp;·&nbsp; 🟡 Medium &nbsp;·&nbsp; 🔴 Hard
           </div>
         </div>
 
@@ -429,11 +460,11 @@ export default function Practice() {
           <div className="section-title" style={{ marginBottom: 12 }}>📊 Score</div>
           <ScorePanel
             result={result}
-            questionId={currentQ?.id ?? null}
-            question={currentQ?.question_text ?? ''}
+            currentQ={currentQ}
             transcript={transcript}
             filler={filler}
             userId={user?.id ?? null}
+            minScore={minScore}
           />
         </div>
 

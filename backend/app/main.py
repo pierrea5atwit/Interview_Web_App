@@ -44,8 +44,10 @@ def get_config():
     Sensitive keys (HF_TOKEN, service-role key, etc.) are never returned.
     """
     return {
-        "supabase_url":      os.getenv("SUPABASE_URL", ""),
-        "supabase_anon_key": os.getenv("SUPABASE_ANON_KEY", ""),
+        "supabase_url":            os.getenv("SUPABASE_URL", ""),
+        "supabase_anon_key":       os.getenv("SUPABASE_ANON_KEY", ""),
+        # Non-sensitive app config the frontend needs at runtime
+        "best_response_min_score": float(os.getenv("BEST_RESPONSE_MIN_SCORE", "7.0")),
     }
 
 
@@ -148,7 +150,8 @@ def score(req: ScoreRequest):
 
 class SaveResponseRequest(BaseModel):
     user_id:      str
-    question_id:  str
+    question_id:  str = ""
+    question_text: str = ""
     transcript:   str
     clarity:      float
     conciseness:  float
@@ -193,7 +196,7 @@ def get_responses(user_id: str = Query(...)):
         result = (
             db.table("responses")
               .select(
-                  "id, question_id, transcript, clarity, conciseness, structure, "
+                  "id, question_id, question_text, transcript, clarity, conciseness, structure, "
                   "confidence, relevance, overall_score, suggestion, encouragement, "
                   "filler_count, filler_rate, created_at"
               )
@@ -205,6 +208,18 @@ def get_responses(user_id: str = Query(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+
+# ── Public config (safe to expose — anon key only) ────────────────────────────
+
+@app.get("/api/config")
+def get_config():
+    """Return public Supabase credentials for the React frontend.
+    Called at runtime so HuggingFace Spaces secrets are available."""
+    return {
+        "supabase_url":      os.getenv("SUPABASE_URL", ""),
+        "supabase_anon_key": os.getenv("SUPABASE_ANON_KEY", ""),
+    }
 
 # ── Settings ───────────────────────────────────────────────────────────────────
 
@@ -235,6 +250,7 @@ class SettingsPayload(BaseModel):
     transcription_model:        str = "base"
     hf_token:                   str = ""
     silence_threshold_seconds:  str = "5.0"
+    best_response_min_score:    str = "7.0"
 
 
 @app.post("/api/settings")
@@ -245,6 +261,7 @@ def save_settings(payload: SettingsPayload):
         mapping = {
             "TRANSCRIPTION_MODEL":       payload.transcription_model,
             "SILENCE_THRESHOLD_SECONDS": payload.silence_threshold_seconds,
+            "BEST_RESPONSE_MIN_SCORE":   payload.best_response_min_score,
         }
         if payload.hf_token and payload.hf_token != "***":
             mapping["HF_TOKEN"] = payload.hf_token
@@ -315,22 +332,4 @@ def delete_all_responses(user_id: str = Query(...)):
     """Delete every response belonging to a user."""
     db = get_client()
     if not db:
-        raise HTTPException(status_code=503, detail="Supabase not configured.")
-    try:
-        db.table("responses").delete().eq("user_id", user_id).execute()
-        return {"status": "deleted"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/responses/{response_id}")
-def delete_response(response_id: str):
-    """Delete a single response by ID."""
-    db = get_client()
-    if not db:
-        raise HTTPException(status_code=503, detail="Supabase not configured.")
-    try:
-        db.table("responses").delete().eq("id", response_id).execute()
-        return {"status": "deleted"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status

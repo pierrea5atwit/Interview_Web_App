@@ -146,7 +146,7 @@ export default function BestResponses() {
   const [error, setError]       = useState(null)
 
   const load = useCallback(() => {
-    if (!user) return
+    if (!user) { setLoading(false); return }
     setLoading(true); setError(null)
     fetch(`/api/responses?user_id=${user.id}`)
       .then(r => {

@@ -8,29 +8,37 @@ export function AuthProvider({ children }) {
   const [session, setSession] = useState(undefined)
   const sbRef = useRef(null)  // resolved Supabase client
 
+  const unsubRef = useRef(null)  // survives async gap; cleanup can always call it
+
   useEffect(() => {
-    let unsub = null
+    let cancelled = false
 
     supabasePromise.then(sb => {
       sbRef.current = sb
 
       if (!sb) {
-        // Supabase not configured — guest mode, treat as unauthenticated
-        setSession(null)
+        if (!cancelled) setSession(null)
         return
       }
 
       sb.auth.getSession().then(({ data }) => {
-        setSession(data.session ?? null)
+        if (!cancelled) setSession(data.session ?? null)
       })
 
       const { data: { subscription } } = sb.auth.onAuthStateChange((_event, s) => {
-        setSession(s ?? null)
+        if (!cancelled) setSession(s ?? null)
       })
-      unsub = subscription
+      unsubRef.current = subscription
+
+      // If the component already unmounted before the promise resolved, clean up now
+      if (cancelled) { subscription.unsubscribe(); unsubRef.current = null }
     })
 
-    return () => { unsub?.unsubscribe() }
+    return () => {
+      cancelled = true
+      unsubRef.current?.unsubscribe()
+      unsubRef.current = null
+    }
   }, [])
 
   const signIn  = (email, password) => sbRef.current?.auth.signInWithPassword({ email, password })
