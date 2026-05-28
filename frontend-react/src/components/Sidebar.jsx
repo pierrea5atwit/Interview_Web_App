@@ -1,4 +1,5 @@
 import { NavLink } from 'react-router-dom'
+import { useAuth } from '../context/AuthContext'
 
 const NAV = [
   { to: '/',               icon: '🏠', label: 'Home' },
@@ -8,6 +9,8 @@ const NAV = [
 ]
 
 export default function Sidebar() {
+  const { user, signOut } = useAuth()
+
   return (
     <nav className="sidebar">
       <div className="sidebar-brand">
@@ -24,6 +27,16 @@ export default function Sidebar() {
           )}
         </NavLink>
       ))}
+
+      {user && (
+        <div className="sidebar-user">
+          <div className="sidebar-divider" />
+          <div className="sidebar-user-email" title={user.email}>{user.email}</div>
+          <button className="sidebar-nav-btn sidebar-logout-btn" onClick={signOut}>
+            🚪&nbsp;&nbsp;Sign out
+          </button>
+        </div>
+      )}
     </nav>
   )
 }

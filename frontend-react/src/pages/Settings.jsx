@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useAuth } from '../context/AuthContext'
 
 const MODEL_OPTIONS = {
   tiny:   'Tiny (~75 MB) — Fastest, OK accuracy',
@@ -30,28 +31,32 @@ function StatusBadge({ status }) {
 }
 
 export default function Settings() {
+  const { user } = useAuth()
+
   const [form, setForm] = useState({
-    transcription_model: 'base',
-    ollama_base_url:     'http://localhost:11434',
-    ollama_model:        'llama3.2',
-    hf_token:            '',
-    best_response_min_score:    '7.0',
-    silence_threshold_seconds:  '5.0',
+    transcription_model:       'base',
+    hf_token:                  '',
+    best_response_min_score:   '7.0',
+    silence_threshold_seconds: '5.0',
   })
 
-  const [saved,       setSaved]       = useState(false)
-  const [saving,      setSaving]      = useState(false)
-  const [ollamaStatus, setOllamaStatus] = useState(null)
-  const [hfStatus,     setHfStatus]     = useState(null)
-  const [sysInfo,      setSysInfo]      = useState(null)
-  const [dangerCount,  setDangerCount]  = useState(null)
-  const [clearing,     setClearing]     = useState(false)
+  const [saved,      setSaved]      = useState(false)
+  const [saving,     setSaving]     = useState(false)
+  const [hfStatus,   setHfStatus]   = useState(null)
+  const [sysInfo,    setSysInfo]    = useState(null)
+  const [dangerCount, setDangerCount] = useState(null)
+  const [clearing,   setClearing]   = useState(false)
 
   useEffect(() => {
     fetch('/api/settings').then(r => r.json()).then(data => setForm(f => ({ ...f, ...data }))).catch(() => {})
     fetch('/api/system-info').then(r => r.json()).then(setSysInfo).catch(() => {})
-    fetch('/api/best-responses').then(r => r.json()).then(d => setDangerCount(Array.isArray(d) ? d.length : 0)).catch(() => {})
-  }, [])
+    if (user) {
+      fetch(`/api/responses?user_id=${user.id}`)
+        .then(r => r.ok ? r.json() : [])
+        .then(d => setDangerCount(Array.isArray(d) ? d.length : 0))
+        .catch(() => {})
+    }
+  }, [user])
 
   function set(key, val) {
     setForm(f => ({ ...f, [key]: val }))
@@ -59,8 +64,7 @@ export default function Settings() {
   }
 
   async function saveSettings() {
-    setSaving(true)
-    setSaved(false)
+    setSaving(true); setSaved(false)
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
@@ -71,38 +75,12 @@ export default function Settings() {
       else throw new Error(await res.text())
     } catch (e) {
       alert('Save failed: ' + e.message)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function testOllama() {
-    setOllamaStatus({ type: 'loading', message: 'Connecting…' })
-    try {
-      const res = await fetch('/api/settings/test-ollama', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: form.ollama_base_url, model: form.ollama_model }),
-      })
-      const data = await res.json()
-      if (res.ok) {
-        if (data.model_found) {
-          setOllamaStatus({ type: 'ok', message: `Connected. Model \`${form.ollama_model}\` is available.` })
-        } else {
-          setOllamaStatus({ type: 'warn', message: `Connected but \`${form.ollama_model}\` not found. Available: ${(data.available_models || []).join(', ')}` })
-        }
-      } else {
-        setOllamaStatus({ type: 'error', message: data.detail || 'Connection failed' })
-      }
-    } catch (e) {
-      setOllamaStatus({ type: 'error', message: String(e) })
-    }
+    } finally { setSaving(false) }
   }
 
   async function testHF() {
     if (!form.hf_token || form.hf_token === '***') {
-      setHfStatus({ type: 'warn', message: 'No token entered.' })
-      return
+      setHfStatus({ type: 'warn', message: 'No token entered.' }); return
     }
     setHfStatus({ type: 'loading', message: 'Authenticating…' })
     try {
@@ -120,19 +98,20 @@ export default function Settings() {
   }
 
   async function clearAll() {
+    if (!user) { alert('Sign in to manage responses.'); return }
     if (!window.confirm(`Delete all ${dangerCount} saved responses? This cannot be undone.`)) return
     setClearing(true)
     try {
-      await fetch('/api/best-responses/all', { method: 'DELETE' })
+      // Delete each response — Supabase RLS ensures only own rows are deleted
+      await fetch(`/api/responses/all?user_id=${user.id}`, { method: 'DELETE' })
       setDangerCount(0)
-    } finally {
-      setClearing(false)
-    }
+    } catch {
+      alert('Delete failed — try again or remove responses individually.')
+    } finally { setClearing(false) }
   }
 
   return (
     <>
-      {/* ── Page header ── */}
       <div className="page-header">
         <span className="page-header-icon">⚙️</span>
         <div>
@@ -144,7 +123,7 @@ export default function Settings() {
       {/* ── Transcription ── */}
       <Section title="🎙 Transcription Model">
         <p className="caption" style={{ marginBottom: 12 }}>
-          faster-whisper runs locally on your CPU. Larger models are more accurate but slower.
+          faster-whisper runs server-side. Larger models are more accurate but slower.
         </p>
         <div style={{ maxWidth: 400 }}>
           <label>Model size</label>
@@ -157,63 +136,28 @@ export default function Settings() {
       </Section>
 
       {/* ── LLM Scoring ── */}
-      <Section title="🤖 LLM Scoring Engine">
+      <Section title="🤖 Scoring Engine">
         <p className="caption" style={{ marginBottom: 16 }}>
-          Scoring tries providers in order: <strong>Ollama → HuggingFace → Rule-based</strong>.
-          Rule-based scoring always works with no setup.
+          Scoring uses <strong>HuggingFace Inference API</strong> (<code>Mistral-7B-Instruct</code>)
+          with a rule-based fallback when HF is unavailable.
+          Add a free token at{' '}
+          <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
+            huggingface.co/settings/tokens
+          </a> for better results.
         </p>
-        <div className="grid-2" style={{ gap: 32 }}>
-          {/* Ollama */}
-          <div>
-            <div style={{ fontWeight: 700, marginBottom: 8 }}>Ollama (local)</div>
-            <p className="caption" style={{ marginBottom: 12 }}>
-              <a href="https://ollama.com" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
-                Install Ollama →
-              </a>{' '}then run <code>ollama pull llama3.2</code>
-            </p>
-            <label>Base URL</label>
-            <input
-              type="text"
-              value={form.ollama_base_url}
-              onChange={e => set('ollama_base_url', e.target.value)}
-              style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: '0.9rem', padding: '8px 12px', width: '100%', marginBottom: 10, outline: 'none' }}
-            />
-            <label>Model name</label>
-            <input
-              type="text"
-              value={form.ollama_model}
-              onChange={e => set('ollama_model', e.target.value)}
-              placeholder="llama3.2"
-              style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: '0.9rem', padding: '8px 12px', width: '100%', marginBottom: 10, outline: 'none' }}
-            />
-            <button className="btn btn-secondary" onClick={testOllama} style={{ marginBottom: 8 }}>
-              Test Ollama connection
-            </button>
-            <StatusBadge status={ollamaStatus} />
-          </div>
-
-          {/* HuggingFace */}
-          <div>
-            <div style={{ fontWeight: 700, marginBottom: 8 }}>HuggingFace (cloud fallback)</div>
-            <p className="caption" style={{ marginBottom: 12 }}>
-              Get a free token at{' '}
-              <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
-                huggingface.co/settings/tokens
-              </a>
-            </p>
-            <label>HuggingFace token</label>
-            <input
-              type="password"
-              value={form.hf_token}
-              onChange={e => set('hf_token', e.target.value)}
-              placeholder="hf_..."
-              style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: '0.9rem', padding: '8px 12px', width: '100%', marginBottom: 10, outline: 'none' }}
-            />
-            <button className="btn btn-secondary" onClick={testHF} style={{ marginBottom: 8 }}>
-              Test HuggingFace connection
-            </button>
-            <StatusBadge status={hfStatus} />
-          </div>
+        <div style={{ maxWidth: 400 }}>
+          <label>HuggingFace token</label>
+          <input
+            type="password"
+            value={form.hf_token}
+            onChange={e => set('hf_token', e.target.value)}
+            placeholder="hf_..."
+            style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: '0.9rem', padding: '8px 12px', width: '100%', marginBottom: 10, outline: 'none' }}
+          />
+          <button className="btn btn-secondary" onClick={testHF} style={{ marginBottom: 8 }}>
+            Test HuggingFace connection
+          </button>
+          <StatusBadge status={hfStatus} />
         </div>
       </Section>
 
@@ -288,8 +232,8 @@ export default function Settings() {
             <div>
               {[
                 ['faster-whisper', sysInfo.faster_whisper],
-                ['ollama client',  sysInfo.ollama],
                 ['fastapi',        sysInfo.fastapi],
+                ['supabase',       sysInfo.supabase],
               ].map(([name, ok]) => (
                 <p key={name} className="caption" style={{ marginBottom: 6 }}>
                   <strong>{name}:</strong> {ok ? '✅ installed' : '❌ not installed'}

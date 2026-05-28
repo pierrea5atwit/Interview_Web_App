@@ -1,7 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useAuth } from '../context/AuthContext'
 
 const CATEGORIES = ['clarity', 'conciseness', 'structure', 'confidence', 'relevance']
 const SILENCE_SECONDS = 5
+
+const ROLES = [
+  { value: 'software_engineering', label: 'Software Engineering' },
+  { value: 'marketing',            label: 'Marketing' },
+  { value: 'finance',              label: 'Finance' },
+  { value: 'product_management',   label: 'Product Management' },
+  { value: 'data_science',         label: 'Data Science' },
+]
+
+const TYPES = [
+  { value: 'behavioral', label: 'Behavioral' },
+  { value: 'technical',  label: 'Technical' },
+  { value: 'mixed',      label: 'Mixed' },
+]
 
 function pillClass(score) {
   if (score >= 7) return 'pill-green'
@@ -15,23 +30,17 @@ function scoreClass(score) {
   return 'score-red'
 }
 
-// ── Audio recorder hook ───────────────────────────────────────────────────────
+// ── Audio recorder hook ────────────────────────────────────────────────────────
 function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
-  const [status, setStatus]   = useState('idle') // idle | recording | stopped
-  const mediaRef  = useRef(null)
-  const chunksRef = useRef([])
-  const silenceRef = useRef(null)
-  const analyserRef = useRef(null)
-  const rafRef    = useRef(null)
+  const [status, setStatus]    = useState('idle')
+  const mediaRef   = useRef(null)
+  const chunksRef  = useRef([])
+  const rafRef     = useRef(null)
 
-  const stopRecording = useCallback((reason = 'manual') => {
+  const stopRecording = useCallback(() => {
     cancelAnimationFrame(rafRef.current)
-    clearTimeout(silenceRef.current)
     if (mediaRef.current && mediaRef.current.state !== 'inactive') {
       mediaRef.current.stop()
-    }
-    if (reason === 'silence') {
-      // mediaRef onstop handles the rest
     }
   }, [])
 
@@ -40,19 +49,18 @@ function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
     setStatus('recording')
 
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus' : 'audio/webm' })
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus' : 'audio/webm'
+    const recorder = new MediaRecorder(stream, { mimeType })
     mediaRef.current = recorder
 
-    // Silence detection via Web Audio API
-    const ctx = new AudioContext()
-    const source = ctx.createMediaStreamSource(stream)
+    const ctx      = new AudioContext()
+    const source   = ctx.createMediaStreamSource(stream)
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 512
     source.connect(analyser)
-    analyserRef.current = analyser
-
-    let silenceSince = null
     const data = new Uint8Array(analyser.frequencyBinCount)
+    let silenceSince = null
 
     function checkSilence() {
       analyser.getByteFrequencyData(data)
@@ -60,12 +68,9 @@ function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
       if (rms < 5) {
         if (!silenceSince) silenceSince = Date.now()
         else if (Date.now() - silenceSince > silenceSeconds * 1000) {
-          stopRecording('silence')
-          return
+          stopRecording(); return
         }
-      } else {
-        silenceSince = null
-      }
+      } else { silenceSince = null }
       rafRef.current = requestAnimationFrame(checkSilence)
     }
     rafRef.current = requestAnimationFrame(checkSilence)
@@ -75,20 +80,22 @@ function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
       stream.getTracks().forEach(t => t.stop())
       ctx.close()
       setStatus('stopped')
-      const blob = new Blob(chunksRef.current, { type: recorder.mimeType })
-      onStop(blob)
+      onStop(new Blob(chunksRef.current, { type: recorder.mimeType }))
     }
-
     recorder.start(250)
   }, [onStop, silenceSeconds, stopRecording])
 
   return { status, startRecording, stopRecording }
 }
 
-// ── ScorePanel ────────────────────────────────────────────────────────────────
-function ScorePanel({ result, question, transcript, onSaved }) {
-  const [saved, setSaved] = useState(false)
-  const [saving, setSaving] = useState(false)
+// ── ScorePanel ─────────────────────────────────────────────────────────────────
+function ScorePanel({ result, questionId, question, transcript, filler, userId, minScore = 7.0 }) {
+  const [saved,   setSaved]   = useState(false)
+  const [saving,  setSaving]  = useState(false)
+  const [saveErr, setSaveErr] = useState(null)
+
+  // Reset saved state when result changes
+  useEffect(() => { setSaved(false); setSaveErr(null) }, [result])
 
   if (!result) {
     return (
@@ -99,73 +106,101 @@ function ScorePanel({ result, question, transcript, onSaved }) {
     )
   }
 
-  const { scores, overall_score: ov } = result
+  const ov = result.overall_score ?? 0
 
   async function handleSave() {
-    setSaving(true)
+    if (!userId) { setSaveErr('Sign in to save responses.'); return }
+    if (!questionId) { setSaveErr('No question ID — cannot save.'); return }
+    setSaving(true); setSaveErr(null)
     try {
-      const res = await fetch('/api/best-responses', {
+      const body = {
+        user_id:       userId,
+        question_id:   questionId,
+        transcript,
+        clarity:       result.clarity,
+        conciseness:   result.conciseness,
+        structure:     result.structure,
+        confidence:    result.confidence,
+        relevance:     result.relevance,
+        overall_score: ov,
+        suggestion:    result.suggestion    ?? '',
+        encouragement: result.encouragement ?? '',
+        filler_count:  filler?.filler_count ?? 0,
+        filler_rate:   filler?.filler_rate  ?? 0.0,
+      }
+      const res = await fetch('/api/responses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question,
-          transcript,
-          scores,
-          overall_score: ov,
-          role: result.role,
-          interview_type: result.interview_type,
-        }),
+        body: JSON.stringify(body),
       })
-      if (res.ok) { setSaved(true); onSaved?.() }
-    } finally {
-      setSaving(false)
-    }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.detail || 'Save failed')
+      }
+      setSaved(true)
+    } catch (e) {
+      setSaveErr(e.message)
+    } finally { setSaving(false) }
   }
 
   return (
     <div>
-      {/* Ring */}
+      {/* Overall ring */}
       <div className={`score-ring ${scoreClass(ov)}`}>
         {ov.toFixed(1)}
         <small>Overall</small>
       </div>
       <p style={{ textAlign: 'center', color: 'var(--muted-2)', fontSize: '0.78rem', marginTop: -6, marginBottom: 16 }}>
-        scored by <code>{scores.scorer || '?'}</code>
+        scored by <code>{result.scorer || '?'}</code>
       </p>
 
       <hr />
 
       {/* Category bars */}
       {CATEGORIES.map(cat => {
-        const val = scores[cat] ?? 0
-        const fb  = scores[`${cat}_feedback`] ?? ''
+        const val = result[cat] ?? 0
         return (
           <div key={cat} style={{ marginBottom: 10 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-              <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>{cat.charAt(0).toUpperCase() + cat.slice(1)}</span>
+              <span style={{ fontWeight: 600, fontSize: '0.9rem' }}>
+                {cat.charAt(0).toUpperCase() + cat.slice(1)}
+              </span>
               <span className={`pill ${pillClass(val)}`}>{val}/10</span>
             </div>
             <div className="progress-bar-track">
               <div className="progress-bar-fill" style={{ width: `${val * 10}%` }} />
             </div>
-            {fb && <p className="caption">{fb}</p>}
           </div>
         )
       })}
 
-      {/* Overall feedback */}
-      {scores.feedback && (
+      {/* Suggestion */}
+      {result.suggestion && (
         <>
           <hr />
-          <div className="card" style={{ borderLeft: '3px solid var(--accent)', fontSize: '0.92rem', lineHeight: 1.6 }}>
-            💬 {scores.feedback}
+          <div className="card" style={{ borderLeft: '3px solid var(--amber)', fontSize: '0.92rem', lineHeight: 1.6, marginBottom: 10 }}>
+            <span style={{ color: 'var(--amber)', fontWeight: 700, fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              💡 Suggestion
+            </span>
+            <p style={{ marginTop: 6, color: 'var(--text)' }}>{result.suggestion}</p>
           </div>
         </>
       )}
 
+      {/* Encouragement */}
+      {result.encouragement && (
+        <div className="card" style={{ borderLeft: '3px solid var(--green)', fontSize: '0.92rem', lineHeight: 1.6 }}>
+          <span style={{ color: 'var(--green)', fontWeight: 700, fontSize: '0.78rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            ✨ Coach says
+          </span>
+          <p style={{ marginTop: 6, color: 'var(--text)' }}>{result.encouragement}</p>
+        </div>
+      )}
+
       {/* Save CTA */}
       <hr />
-      {ov >= 7 && !saved && (
+      {saveErr && <div className="alert alert-error" style={{ marginBottom: 8 }}>{saveErr}</div>}
+      {ov >= minScore && !saved && (
         <>
           <div className="alert alert-success" style={{ marginBottom: 8 }}>🏆 High score! Save this response?</div>
           <button className="btn btn-primary btn-full" onClick={handleSave} disabled={saving}>
@@ -173,131 +208,105 @@ function ScorePanel({ result, question, transcript, onSaved }) {
           </button>
         </>
       )}
-      {saved && <div className="alert alert-success">✅ Saved to Best Responses.</div>}
-      {!saved && ov < 7 && (
-        <p className="caption" style={{ textAlign: 'center' }}>Score 7.0+ to save. Current: {ov.toFixed(1)}. Keep going!</p>
+      {saved && <div className="alert alert-success">✅ Saved to your Best Responses.</div>}
+      {!saved && ov < minScore && (
+        <p className="caption" style={{ textAlign: 'center' }}>
+          Score {minScore.toFixed(1)}+ to save. Current: {ov.toFixed(1)}. Keep going!
+        </p>
       )}
     </div>
   )
 }
 
-// ── FillerMetrics ─────────────────────────────────────────────────────────────
+// ── Filler metrics ─────────────────────────────────────────────────────────────
 function FillerMetrics({ filler }) {
   if (!filler) return null
   return (
     <div className="grid-3" style={{ marginTop: 12 }}>
-      <div className="stat-block" style={{ padding: 12 }}>
-        <div className="stat-num" style={{ fontSize: '1.4rem' }}>{filler.total_words}</div>
-        <div className="stat-label">Words</div>
-      </div>
-      <div className="stat-block" style={{ padding: 12 }}>
-        <div className="stat-num" style={{ fontSize: '1.4rem' }}>{filler.filler_count}</div>
-        <div className="stat-label">Fillers</div>
-      </div>
-      <div className="stat-block" style={{ padding: 12 }}>
-        <div className="stat-num" style={{ fontSize: '1.4rem' }}>{(filler.filler_rate ?? 0).toFixed(1)}%</div>
-        <div className="stat-label">Filler Rate</div>
-      </div>
+      {[
+        { num: filler.total_words,                       label: 'Words' },
+        { num: filler.filler_count,                      label: 'Fillers' },
+        { num: `${(filler.filler_rate ?? 0).toFixed(1)}%`, label: 'Filler Rate' },
+      ].map(({ num, label }) => (
+        <div key={label} className="stat-block" style={{ padding: 12 }}>
+          <div className="stat-num" style={{ fontSize: '1.4rem' }}>{num}</div>
+          <div className="stat-label">{label}</div>
+        </div>
+      ))}
     </div>
   )
 }
 
-// ── Main Practice page ────────────────────────────────────────────────────────
+// ── Practice page ──────────────────────────────────────────────────────────────
 export default function Practice() {
-  const [questions, setQuestions]   = useState({})
-  const [role, setRole]             = useState('')
-  const [itype, setItype]           = useState('')
-  const [question, setQuestion]     = useState(null)
+  const { user } = useAuth()
 
-  const [audioURL, setAudioURL]     = useState(null)
-  const [transcript, setTranscript] = useState('')
-  const [filler, setFiller]         = useState(null)
+  const [role,         setRole]         = useState(ROLES[0].value)
+  const [itype,        setItype]        = useState(TYPES[0].value)
+  const [pool,         setPool]         = useState([])   // [{id, question_text}]
+  const [poolLoading,  setPoolLoading]  = useState(false)
+  const [currentQ,     setCurrentQ]     = useState(null) // {id, question_text}
+  const [audioURL,     setAudioURL]     = useState(null)
+  const [transcript,   setTranscript]   = useState('')
+  const [filler,       setFiller]       = useState(null)
   const [transcribing, setTranscribing] = useState(false)
+  const [scoring,      setScoring]      = useState(false)
+  const [result,       setResult]       = useState(null)
 
-  const [scoring, setScoring]       = useState(false)
-  const [result, setResult]         = useState(null)
-
-  // Load question bank
+  // Fetch questions when role or type changes
   useEffect(() => {
-    fetch('/api/questions')
+    setPool([]); setCurrentQ(null); setResult(null)
+    setPoolLoading(true)
+    fetch(`/api/questions?role=${role}&type=${itype}`)
       .then(r => r.json())
-      .then(data => {
-        setQuestions(data)
-        const firstRole = Object.keys(data)[0] || ''
-        setRole(firstRole)
-        const firstType = Object.keys(data[firstRole] || {})[0] || ''
-        setItype(firstType)
-      })
-      .catch(() => {})
-  }, [])
-
-  // When role changes, reset interview type
-  useEffect(() => {
-    if (!questions[role]) return
-    const firstType = Object.keys(questions[role])[0] || ''
-    setItype(firstType)
-  }, [role, questions])
-
-  const roleLabel  = role.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-  const itypeLabel = itype.charAt(0).toUpperCase() + itype.slice(1)
-  const pool       = questions?.[role]?.[itype] ?? []
+      .then(data => setPool(Array.isArray(data) ? data : []))
+      .catch(() => setPool([]))
+      .finally(() => setPoolLoading(false))
+  }, [role, itype])
 
   function newQuestion() {
     if (!pool.length) return
-    setQuestion(pool[Math.floor(Math.random() * pool.length)])
-    setAudioURL(null)
-    setTranscript('')
-    setFiller(null)
-    setResult(null)
+    const q = pool[Math.floor(Math.random() * pool.length)]
+    setCurrentQ(q)
+    setAudioURL(null); setTranscript(''); setFiller(null); setResult(null)
   }
 
-  // Audio recorder
   const handleStop = useCallback(async (blob) => {
-    const url = URL.createObjectURL(blob)
-    setAudioURL(url)
-    setTranscript('')
-    setFiller(null)
-    setResult(null)
+    setAudioURL(URL.createObjectURL(blob))
+    setTranscript(''); setFiller(null); setResult(null)
     setTranscribing(true)
-
     try {
       const fd = new FormData()
-      fd.append('audio', blob, 'recording.webm')
-      const res = await fetch('/api/transcribe', { method: 'POST', body: fd })
+      fd.append('file', blob, 'recording.webm')  // field name: 'file' per API spec
+      const res  = await fetch('/api/transcribe', { method: 'POST', body: fd })
       if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
       setTranscript(data.transcript || '')
       setFiller(data.filler || null)
     } catch (e) {
       setTranscript('Transcription failed: ' + e.message)
-    } finally {
-      setTranscribing(false)
-    }
+    } finally { setTranscribing(false) }
   }, [])
 
   const { status: recStatus, startRecording, stopRecording } = useAudioRecorder({ onStop: handleStop })
 
   async function scoreResponse() {
-    if (!question || !transcript) return
+    if (!currentQ || !transcript) return
     setScoring(true)
     try {
-      const res = await fetch('/api/score', {
+      const res  = await fetch('/api/score', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question, transcript }),
+        body: JSON.stringify({ question: currentQ.question_text, transcript }),
       })
       const data = await res.json()
-      setResult({ ...data, role, interview_type: itype })
-    } catch (e) {
-      alert('Scoring failed: ' + e.message)
-    } finally {
-      setScoring(false)
-    }
+      setResult(data)
+    } catch (e) { alert('Scoring failed: ' + e.message) }
+    finally { setScoring(false) }
   }
 
   return (
     <>
-      {/* ── Page header ── */}
       <div className="page-header">
         <span className="page-header-icon">🎙</span>
         <div>
@@ -306,42 +315,42 @@ export default function Practice() {
         </div>
       </div>
 
-      {/* ── Setup controls ── */}
+      {/* Setup controls */}
       <div style={{ display: 'flex', gap: 16, marginBottom: 20, flexWrap: 'wrap', alignItems: 'flex-end' }}>
         <div style={{ flex: '1 1 160px' }}>
           <label>Role</label>
           <select value={role} onChange={e => setRole(e.target.value)}>
-            {Object.keys(questions).map(r => (
-              <option key={r} value={r}>{r.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}</option>
-            ))}
+            {ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select>
         </div>
         <div style={{ flex: '1 1 140px' }}>
           <label>Interview Type</label>
           <select value={itype} onChange={e => setItype(e.target.value)}>
-            {Object.keys(questions[role] || {}).map(t => (
-              <option key={t} value={t}>{t.charAt(0).toUpperCase() + t.slice(1)}</option>
-            ))}
+            {TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
           </select>
         </div>
-        <button className="btn btn-primary" onClick={newQuestion} disabled={!pool.length}>
-          🎲 New Question
+        <button className="btn btn-primary" onClick={newQuestion} disabled={!pool.length || poolLoading}>
+          {poolLoading ? <><span className="spinner" />&nbsp;Loading…</> : '🎲 New Question'}
         </button>
       </div>
 
-      {/* ── Question card ── */}
-      {question ? (
+      {/* Question card */}
+      {currentQ ? (
         <>
           <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-            <span className="pill pill-green">{roleLabel}</span>
-            <span className="pill pill-amber">{itypeLabel}</span>
+            <span className="pill pill-green">
+              {ROLES.find(r => r.value === role)?.label ?? role}
+            </span>
+            <span className="pill pill-amber">
+              {TYPES.find(t => t.value === itype)?.label ?? itype}
+            </span>
           </div>
-          <div className="question-card">{question}</div>
+          <div className="question-card">{currentQ.question_text}</div>
         </>
       ) : (
         <div style={{
           background: 'rgba(99,102,241,0.07)', border: '1px dashed rgba(99,102,241,0.3)',
-          borderRadius: 12, padding: 24, textAlign: 'center', marginBottom: 8,
+          borderRadius: 12, padding: 24, textAlign: 'center',
         }}>
           <div style={{ fontSize: '2rem', marginBottom: 8 }}>🎲</div>
           <div style={{ color: 'var(--muted)' }}>Click <strong>New Question</strong> to get started</div>
@@ -350,48 +359,36 @@ export default function Practice() {
 
       <div style={{ height: 24 }} />
 
-      {/* ── Two-column layout ── */}
+      {/* Two-column layout */}
       <div className="col-3-2">
 
         {/* LEFT: recorder + transcript */}
         <div>
           <div className="section-title" style={{ marginBottom: 4 }}>Record Your Answer</div>
           <p className="caption" style={{ marginBottom: 16 }}>
-            Click the mic. Auto-stops after {SILENCE_SECONDS} seconds of silence.
+            Click the mic. Auto-stops after {SILENCE_SECONDS}s of silence.
           </p>
 
-          {/* Mic button */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 }}>
             {recStatus === 'recording' ? (
-              <button
-                className="mic-btn recording"
-                onClick={stopRecording}
-                title="Stop recording"
-              >🛑</button>
+              <button className="mic-btn recording" onClick={stopRecording} title="Stop recording">🛑</button>
             ) : (
-              <button
-                className="mic-btn idle"
-                onClick={startRecording}
-                disabled={transcribing}
-                title="Start recording"
-              >🎙</button>
+              <button className="mic-btn idle" onClick={startRecording} disabled={transcribing} title="Start recording">🎙</button>
             )}
             {recStatus === 'recording' && (
               <span style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>
-                <span className="recording-dot" /> Recording… (click to stop)
+                <span className="recording-dot" /> Recording… click to stop early
               </span>
             )}
             {transcribing && (
               <span style={{ color: 'var(--muted)', fontSize: '0.9rem' }}>
-                <span className="spinner" /> &nbsp;Transcribing…
+                <span className="spinner" />&nbsp; Transcribing…
               </span>
             )}
           </div>
 
-          {/* Audio playback */}
           {audioURL && <audio controls src={audioURL} />}
 
-          {/* Transcript */}
           {transcript && !transcribing && (
             <>
               <div className="section-title" style={{ margin: '16px 0 8px' }}>📝 Transcript</div>
@@ -410,20 +407,19 @@ export default function Practice() {
                 <button
                   className="btn btn-primary btn-full"
                   onClick={scoreResponse}
-                  disabled={scoring || !question}
+                  disabled={scoring || !currentQ}
                 >
                   {scoring
-                    ? <><span className="spinner" /> &nbsp;Analysing…</>
+                    ? <><span className="spinner" />&nbsp; Analysing…</>
                     : '📊 Score My Response'}
                 </button>
               )}
             </>
           )}
 
-          {/* Hint box */}
           <div className="hint-box" style={{ marginTop: 20 }}>
             🎙 Auto-stops after <strong>5s silence</strong><br />
-            📝 Transcript appears after recording<br />
+            📝 Edit transcript before scoring if needed<br />
             🏆 Score 7.0+ to save a response
           </div>
         </div>
@@ -433,8 +429,11 @@ export default function Practice() {
           <div className="section-title" style={{ marginBottom: 12 }}>📊 Score</div>
           <ScorePanel
             result={result}
-            question={question}
+            questionId={currentQ?.id ?? null}
+            question={currentQ?.question_text ?? ''}
             transcript={transcript}
+            filler={filler}
+            userId={user?.id ?? null}
           />
         </div>
 

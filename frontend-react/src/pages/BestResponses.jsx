@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useAuth } from '../context/AuthContext'
 
 const CATEGORIES = ['clarity', 'conciseness', 'structure', 'confidence', 'relevance']
 
@@ -23,27 +24,35 @@ function ProgressBar({ value }) {
 }
 
 function ResponseCard({ resp, onDelete }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen]       = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const { overall_score: ov, question, transcript, scores = {}, role = '', interview_type = '', timestamp = '' } = resp
-  const roleLabel  = role.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-  const typeLabel  = interview_type.charAt(0).toUpperCase() + interview_type.slice(1)
-  const date       = timestamp.slice(0, 10)
-  const preview    = question.length > 72 ? question.slice(0, 72) + '…' : question
+
+  const {
+    id,
+    overall_score: ov = 0,
+    transcript = '',
+    clarity = 0, conciseness = 0, structure = 0, confidence = 0, relevance = 0,
+    suggestion = '', encouragement = '',
+    created_at = '',
+  } = resp
+
+  // Questions come as a nested object from Supabase join or as a flat question_text
+  const questionText = resp.questions?.question_text ?? resp.question_text ?? resp.question ?? '—'
+  const date = created_at ? created_at.slice(0, 10) : ''
+  const preview = questionText.length > 72 ? questionText.slice(0, 72) + '…' : questionText
+
+  const scores = { clarity, conciseness, structure, confidence, relevance }
 
   async function handleDelete() {
     setDeleting(true)
     try {
-      await fetch(`/api/best-responses/${resp.id}`, { method: 'DELETE' })
-      onDelete(resp.id)
-    } finally {
-      setDeleting(false)
-    }
+      await fetch(`/api/responses/${id}`, { method: 'DELETE' })
+      onDelete(id)
+    } finally { setDeleting(false) }
   }
 
   return (
     <div className="card" style={{ marginBottom: 12, padding: 0, overflow: 'hidden' }}>
-      {/* Header row — click to expand */}
       <button
         onClick={() => setOpen(o => !o)}
         style={{
@@ -61,29 +70,25 @@ function ResponseCard({ resp, onDelete }) {
           {ov.toFixed(1)}/10
         </span>
         <span style={{ flex: 1, fontWeight: 600, fontSize: '0.92rem' }}>{preview}</span>
-        <span style={{ color: 'var(--muted-2)', fontSize: '0.85rem', flexShrink: 0 }}>
+        {date && <span style={{ color: 'var(--muted-2)', fontSize: '0.8rem', flexShrink: 0 }}>{date}</span>}
+        <span style={{ color: 'var(--muted-2)', fontSize: '0.85rem', flexShrink: 0, marginLeft: 4 }}>
           {open ? '▲' : '▼'}
         </span>
       </button>
 
-      {/* Expanded body */}
       {open && (
         <div style={{ padding: '0 20px 20px', borderTop: '1px solid var(--border)' }}>
-          <p style={{ color: 'var(--accent)', fontWeight: 600, fontSize: '0.8rem', margin: '12px 0 8px' }}>
-            {roleLabel} · {typeLabel} · {date}
-          </p>
-
-          <div className="col-3-2" style={{ gap: 24 }}>
+          <div className="col-3-2" style={{ gap: 24, marginTop: 16 }}>
             {/* Left: question + transcript */}
             <div>
-              <div className="question-card" style={{ marginBottom: 12 }}>{question}</div>
+              <div className="question-card" style={{ marginBottom: 12 }}>{questionText}</div>
               <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 6 }}>Your answer:</div>
               <div className="card" style={{ fontSize: '0.92rem', lineHeight: 1.7, color: '#cbd5e1' }}>
                 {transcript}
               </div>
             </div>
 
-            {/* Right: category scores */}
+            {/* Right: scores */}
             <div>
               <div style={{ fontWeight: 700, fontSize: '0.9rem', marginBottom: 10 }}>Category scores:</div>
               {CATEGORIES.map(cat => {
@@ -100,10 +105,19 @@ function ResponseCard({ resp, onDelete }) {
                   </div>
                 )
               })}
-              {scores.feedback && (
+              {(suggestion || encouragement) && (
                 <>
                   <hr />
-                  <p className="caption">💬 {scores.feedback}</p>
+                  {suggestion && (
+                    <p className="caption" style={{ marginBottom: 6 }}>
+                      <span style={{ color: 'var(--amber)', fontWeight: 700 }}>💡</span> {suggestion}
+                    </p>
+                  )}
+                  {encouragement && (
+                    <p className="caption">
+                      <span style={{ color: 'var(--green)', fontWeight: 700 }}>✨</span> {encouragement}
+                    </p>
+                  )}
                 </>
               )}
             </div>
@@ -125,19 +139,24 @@ function ResponseCard({ resp, onDelete }) {
 }
 
 export default function BestResponses() {
+  const { user } = useAuth()
   const [all, setAll]           = useState([])
   const [loading, setLoading]   = useState(true)
-  const [filterRole, setFilterRole] = useState([])
   const [minScore, setMinScore] = useState(0)
+  const [error, setError]       = useState(null)
 
   const load = useCallback(() => {
-    setLoading(true)
-    fetch('/api/best-responses')
-      .then(r => r.json())
+    if (!user) return
+    setLoading(true); setError(null)
+    fetch(`/api/responses?user_id=${user.id}`)
+      .then(r => {
+        if (!r.ok) throw new Error(`API error ${r.status}`)
+        return r.json()
+      })
       .then(data => setAll(Array.isArray(data) ? data.sort((a, b) => b.overall_score - a.overall_score) : []))
-      .catch(() => setAll([]))
+      .catch(e => { setError(e.message); setAll([]) })
       .finally(() => setLoading(false))
-  }, [])
+  }, [user])
 
   useEffect(() => { load() }, [load])
 
@@ -156,18 +175,11 @@ export default function BestResponses() {
   const total  = all.length
   const avgOv  = total ? +(all.reduce((s, r) => s + r.overall_score, 0) / total).toFixed(1) : 0
   const bestOv = total ? Math.max(...all.map(r => r.overall_score)) : 0
-  const allRoles = [...new Set(all.map(r => (r.role || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())))]
-    .filter(Boolean).sort()
-  const rolesCount = new Set(all.map(r => r.role)).size
 
-  const filtered = all.filter(r => {
-    const rl = (r.role || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-    return (filterRole.length === 0 || filterRole.includes(rl)) && r.overall_score >= minScore
-  })
+  const filtered = all.filter(r => r.overall_score >= minScore)
 
   return (
     <>
-      {/* ── Page header ── */}
       <div className="page-header">
         <span className="page-header-icon">🏆</span>
         <div>
@@ -176,13 +188,13 @@ export default function BestResponses() {
         </div>
       </div>
 
-      {/* ── Summary stats ── */}
+      {/* Summary stats */}
       <div className="grid-4" style={{ marginBottom: 24 }}>
         {[
           { num: total,             label: 'Saved' },
           { num: avgOv.toFixed(1),  label: 'Avg Score' },
           { num: bestOv.toFixed(1), label: 'Best Score' },
-          { num: rolesCount,        label: 'Roles Practiced' },
+          { num: '—',               label: 'Roles Practiced' },
         ].map(({ num, label }) => (
           <div key={label} className="stat-block">
             <div className="stat-num">{num}</div>
@@ -191,43 +203,10 @@ export default function BestResponses() {
         ))}
       </div>
 
-      {/* ── Filters ── */}
+      {/* Filters */}
       <div className="card" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', gap: 16, alignItems: 'flex-end', flexWrap: 'wrap' }}>
-          {/* Role filter — multi-select via checkboxes */}
-          <div style={{ flex: '1 1 200px' }}>
-            <label>Filter by Role</label>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
-              {allRoles.map(r => (
-                <button
-                  key={r}
-                  className={`pill ${filterRole.includes(r) ? 'pill-green' : ''}`}
-                  style={{
-                    cursor: 'pointer', background: filterRole.includes(r) ? undefined : 'var(--bg)',
-                    border: filterRole.includes(r) ? undefined : '1px solid var(--border)',
-                    color: filterRole.includes(r) ? undefined : 'var(--muted)',
-                  }}
-                  onClick={() => setFilterRole(prev =>
-                    prev.includes(r) ? prev.filter(x => x !== r) : [...prev, r]
-                  )}
-                >
-                  {r}
-                </button>
-              ))}
-              {filterRole.length > 0 && (
-                <button
-                  className="pill"
-                  style={{ cursor: 'pointer', background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--muted)' }}
-                  onClick={() => setFilterRole([])}
-                >
-                  ✕ Clear
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Min score slider */}
-          <div style={{ flex: '0 0 200px' }}>
+          <div style={{ flex: '0 0 220px' }}>
             <label>Min Score: {minScore.toFixed(1)}</label>
             <input
               type="range" min={0} max={10} step={0.5}
@@ -236,14 +215,16 @@ export default function BestResponses() {
               style={{ width: '100%', accentColor: 'var(--accent)', marginTop: 8 }}
             />
           </div>
-
           <button className="btn btn-secondary" onClick={exportJSON} disabled={!total}>
             ⬇ Export JSON
           </button>
         </div>
       </div>
 
-      {/* ── Response list ── */}
+      {/* Response list */}
+      {error && (
+        <div className="alert alert-error" style={{ marginBottom: 16 }}>{error}</div>
+      )}
       {loading ? (
         <div style={{ textAlign: 'center', padding: 48, color: 'var(--muted)' }}>
           <span className="spinner" /> Loading…

@@ -1,3 +1,16 @@
+"""
+Scoring service — single HuggingFace inference call with rule-based fallback.
+
+Output schema (always):
+  clarity      float 0-10
+  conciseness  float 0-10
+  structure    float 0-10
+  confidence   float 0-10
+  relevance    float 0-10
+  suggestion   str   one specific actionable improvement (≤30 words)
+  encouragement str  one encouraging sentence (≤20 words)
+  scorer       str   "huggingface" | "rule_based"
+"""
 import json
 import os
 import re
@@ -5,219 +18,170 @@ from .filler import analyze_fillers
 
 CATEGORIES = ["clarity", "conciseness", "structure", "confidence", "relevance"]
 
-_PROMPT_TEMPLATE = """You are an expert interview coach. Score this interview response objectively.
+_SYSTEM = """\
+You are a warm, practical interview coach. Your job is to score interview answers and give one concrete, helpful suggestion.
+
+Rules you must follow without exception:
+- Reply with valid JSON only. No markdown fences, no prose outside the JSON.
+- Do not use "---" anywhere in your output.
+- Do not use phrases like "That's not X, it's Y" or "This isn't X, it's Y".
+- Do not use AI / tech-sounding words like "leveraging", "delve", "in the realm of", "as an AI", "it's important to note".
+- Write like a mentor texting a friend — warm, direct, specific.
+- Keep suggestion under 30 words. Keep encouragement under 20 words.
+
+Scoring guide (0–10 for each category):
+  clarity      How easy is the answer to follow? Clear language, no rambling. 8+ = crisp and easy to follow.
+  conciseness  Is it the right length? 100–250 words is ideal. Penalise heavy over- or under-explaining.
+  structure    Does it have a logical flow (e.g. STAR: Situation, Task, Action, Result)? 8+ = obvious structure.
+  confidence   Direct language, no excessive hedging ("I think", "maybe", "kind of"). 8+ = assertive and grounded.
+  relevance    Does the answer actually address what was asked? Keyword alignment + on-topic content. 8+ = clearly on-point.
+"""
+
+_USER_PROMPT = """\
+Score this interview answer and give ONE specific, actionable suggestion.
 
 Question: {question}
 
-Response: {transcript}
+Answer: {transcript}
 
-Score each category from 0 to 10 and provide brief, actionable feedback (one sentence each).
-
-Respond with ONLY valid JSON — no markdown, no extra text:
+Return ONLY this JSON (numbers are floats 0–10):
 {{
-  "clarity": <int 0-10>,
-  "clarity_feedback": "<one sentence>",
-  "conciseness": <int 0-10>,
-  "conciseness_feedback": "<one sentence>",
-  "structure": <int 0-10>,
-  "structure_feedback": "<one sentence>",
-  "confidence": <int 0-10>,
-  "confidence_feedback": "<one sentence>",
-  "relevance": <int 0-10>,
-  "relevance_feedback": "<one sentence>",
-  "feedback": "<2-3 sentence overall feedback with one specific improvement>"
+  "clarity": <float>,
+  "conciseness": <float>,
+  "structure": <float>,
+  "confidence": <float>,
+  "relevance": <float>,
+  "suggestion": "<one specific improvement, max 30 words>",
+  "encouragement": "<one encouraging sentence, max 20 words>"
 }}"""
 
 
-def _parse_llm_json(text: str) -> dict:
-    text = re.sub(r"```json?\s*|\s*```", "", text).strip()
+def _parse_json(raw: str) -> dict:
+    """Strip markdown fences, extract the first JSON object, parse it."""
+    text = re.sub(r"```json?\s*|\s*```", "", raw).strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        text = match.group()
     return json.loads(text)
 
 
-def _score_with_ollama(question: str, transcript: str) -> dict:
-    import ollama
-    model = os.getenv("OLLAMA_MODEL", "llama3.2")
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    client = ollama.Client(host=base_url)
-    response = client.chat(
-        model=model,
-        messages=[{"role": "user", "content": _PROMPT_TEMPLATE.format(
-            question=question, transcript=transcript[:2000]
-        )}],
-        options={"temperature": 0.1},
-    )
-    result = _parse_llm_json(response.message.content)
-    result["scorer"] = "ollama"
+def _normalise(result: dict) -> dict:
+    """Coerce scores to float and clamp to [0, 10]."""
+    for cat in CATEGORIES:
+        result[cat] = float(max(0.0, min(10.0, result.get(cat, 5.0))))
+    result.setdefault("suggestion", "Pick one moment from your answer and add a concrete detail to make it stick.")
+    result.setdefault("encouragement", "Good effort — keep building on this.")
     return result
 
 
+# ── HuggingFace inference ──────────────────────────────────────────────────────
+
 def _score_with_huggingface(question: str, transcript: str) -> dict:
     from huggingface_hub import InferenceClient
-    token = os.getenv("HF_TOKEN", "")
-    client = InferenceClient(token=token if token else None)
-    prompt = _PROMPT_TEMPLATE.format(
-        question=question, transcript=transcript[:2000]
-    )
-    response = client.text_generation(
-        prompt,
+
+    token = os.getenv("HF_TOKEN", "") or None
+    client = InferenceClient(token=token)
+
+    response = client.chat_completion(
         model="mistralai/Mistral-7B-Instruct-v0.2",
-        max_new_tokens=512,
-        temperature=0.1,
+        messages=[
+            {"role": "system", "content": _SYSTEM},
+            {"role": "user",   "content": _USER_PROMPT.format(
+                question=question,
+                transcript=transcript[:1500],
+            )},
+        ],
+        max_tokens=280,
+        temperature=0.2,
     )
-    result = _parse_llm_json(response)
+
+    raw = response.choices[0].message.content
+    result = _normalise(_parse_json(raw))
     result["scorer"] = "huggingface"
     return result
 
 
+# ── Rule-based fallback ────────────────────────────────────────────────────────
+
+_SUGGESTIONS = {
+    "clarity":     "Use shorter sentences and one concrete example to make your point easy to follow.",
+    "conciseness": "Aim for 150–200 words — cut any recap that doesn't add new information.",
+    "structure":   "Walk through Situation, Task, Action, Result so the listener knows where you are at each step.",
+    "confidence":  "Swap phrases like 'I think' and 'kind of' for direct statements — you know this.",
+    "relevance":   "Start by echoing a word from the question so the connection is obvious from the first sentence.",
+}
+
+_ENCOURAGEMENTS = {
+    "high":   "Excellent — this answer is interview-ready.",
+    "mid":    "Solid foundation here — one small tweak will make it land.",
+    "low":    "Good effort getting it out — consistency will move these scores fast.",
+}
+
+
 def _score_rule_based(question: str, transcript: str) -> dict:
-    words = transcript.split()
-    word_count = len(words)
-    lower = transcript.lower()
+    words     = transcript.split()
+    wc        = len(words)
+    lower     = transcript.lower()
+    filler    = analyze_fillers(transcript)
 
-    # Clarity: Whisper output often has no punctuation, so avoid sentence-splitting.
-    # Instead score based on whether the response is an appropriate length to follow.
-    if 80 <= word_count <= 220:
-        clarity = 8
-        clarity_note = "Good length — easy to follow."
-    elif 40 <= word_count < 80 or 220 < word_count <= 320:
-        clarity = 6
-        clarity_note = "Slightly short." if word_count < 80 else "Getting long — may lose the listener."
-    elif word_count < 40:
-        clarity = 4
-        clarity_note = "Too brief to evaluate properly."
-    else:
-        clarity = 3
-        clarity_note = "Very long — hard to follow."
+    # Clarity (length proxy)
+    if   80 <= wc <= 220:  clarity = 8.0
+    elif 40 <= wc <   80:  clarity = 6.0
+    elif 220 < wc <= 320:  clarity = 6.0
+    elif wc < 40:          clarity = 4.0
+    else:                  clarity = 3.0
 
-    if 100 <= word_count <= 250:
-        conciseness = 8
-    elif 60 <= word_count < 100 or 250 < word_count <= 350:
-        conciseness = 6
-    elif 30 <= word_count < 60 or 350 < word_count <= 450:
-        conciseness = 4
-    else:
-        conciseness = 2
+    # Conciseness
+    if   100 <= wc <= 250: conciseness = 8.0
+    elif  60 <= wc < 100:  conciseness = 6.0
+    elif 250 < wc <= 350:  conciseness = 6.0
+    elif  30 <= wc <  60:  conciseness = 4.0
+    elif 350 < wc <= 450:  conciseness = 4.0
+    else:                  conciseness = 2.0
 
-    star_keywords = ["situation", "task", "action", "result", "problem",
-                     "solution", "first", "then", "finally", "ultimately",
-                     "as a result", "consequently"]
-    structure = min(10, sum(2 for kw in star_keywords if kw in lower))
+    # Structure (STAR keyword hits)
+    star = ["situation", "task", "action", "result", "problem", "solution",
+            "first", "then", "finally", "ultimately", "as a result", "consequently"]
+    structure = float(min(10, sum(2 for kw in star if kw in lower)))
 
-    hedging = ["maybe", "perhaps", "kind of", "sort of", "i think", "i guess",
-               "probably", "might", "i'm not sure", "possibly"]
-    hedge_count = sum(1 for h in hedging if h in lower)
-    confidence = max(0, 8 - hedge_count * 2)
+    # Confidence (hedges + fillers)
+    hedges = ["maybe", "perhaps", "kind of", "sort of", "i think", "i guess",
+              "probably", "might", "i'm not sure", "possibly"]
+    hedge_hits = sum(1 for h in hedges if h in lower)
+    confidence = float(max(0.0, 8.0 - hedge_hits * 2.0 - min(3, filler["filler_count"])))
 
-    q_words = set(re.findall(r"\b\w{4,}\b", question.lower()))
-    a_words = set(re.findall(r"\b\w{4,}\b", lower))
-    overlap = len(q_words & a_words) / max(len(q_words), 1)
-    relevance = min(10, round(overlap * 20))
+    # Relevance (keyword overlap)
+    q_words  = set(re.findall(r"\b\w{4,}\b", question.lower()))
+    a_words  = set(re.findall(r"\b\w{4,}\b", lower))
+    overlap  = len(q_words & a_words) / max(len(q_words), 1)
+    relevance = float(min(10.0, round(overlap * 20)))
 
-    filler_data = analyze_fillers(transcript)
-    filler_penalty = min(3, filler_data["filler_count"])
-    confidence = max(0, confidence - filler_penalty)
+    scores  = dict(clarity=clarity, conciseness=conciseness,
+                   structure=structure, confidence=confidence, relevance=relevance)
+    weakest = min(scores, key=scores.get)
+    avg     = sum(scores.values()) / 5
 
-    scores_list = [clarity, conciseness, structure, confidence, relevance]
-    worst_idx = scores_list.index(min(scores_list))
-    worst_cat = CATEGORIES[worst_idx]
-
-    overall = sum(scores_list) / 5
-    tone = "strong" if overall >= 7 else "developing" if overall >= 5 else "early-stage"
+    tier = "high" if avg >= 7 else "mid" if avg >= 5 else "low"
 
     return {
-        "clarity": clarity,
-        "clarity_feedback": clarity_note,
-        "conciseness": conciseness,
-        "conciseness_feedback": f"Response is {word_count} words. {'On target.' if conciseness >= 7 else 'Aim for 100–250 words.'}",
-        "structure": structure,
-        "structure_feedback": "Good logical structure." if structure >= 6 else "Consider the STAR method (Situation, Task, Action, Result).",
-        "confidence": confidence,
-        "confidence_feedback": f"Found {filler_data['filler_count']} filler words. {'Sounds confident.' if confidence >= 7 else 'Reduce hedging language.'}",
-        "relevance": relevance,
-        "relevance_feedback": "Directly addresses the question." if relevance >= 6 else "Try to reference the question more explicitly.",
-        "feedback": f"Your {word_count}-word response shows {tone} interview skills. Focus on improving your {worst_cat} — that's your biggest opportunity here. Keep practicing!",
-        "scorer": "rule_based",
+        **scores,
+        "suggestion":    _SUGGESTIONS[weakest],
+        "encouragement": _ENCOURAGEMENTS[tier],
+        "scorer":        "rule_based",
     }
 
 
+# ── Public API ─────────────────────────────────────────────────────────────────
+
 def score_response(question: str, transcript: str) -> dict:
-    """Try Ollama → HuggingFace → rule-based. Returns scoring dict."""
-    llm_failed = False
-    for scorer in [_score_with_ollama, _score_with_huggingface]:
-        try:
-            return scorer(question, transcript)
-        except Exception:
-            llm_failed = True
-            continue
-    result = _score_rule_based(question, transcript)
-    if llm_failed:
-        result["scorer"] = "rule_based (LLM unavailable)"
-    return result
+    """HuggingFace → rule-based fallback. Always returns the standard schema."""
+    try:
+        return _score_with_huggingface(question, transcript)
+    except Exception:
+        result = _score_rule_based(question, transcript)
+        result["scorer"] = "rule_based (HF unavailable)"
+        return result
 
 
 def overall_score(scores: dict) -> float:
-    return round(sum(scores.get(c, 0) for c in CATEGORIES) / len(CATEGORIES), 1)
-
-
-_BETTER_PROMPT = """You are an expert interview coach. A candidate answered an interview question.
-Rewrite their response as a stronger 3–5 sentence answer that scores higher on clarity, structure, and confidence.
-Keep the same topic and personal voice, but fix the weakest areas.
-
-Question: {question}
-Original response: {transcript}
-Weakest areas: {weak_cats}
-
-Write ONLY the improved response — no intro, no labels, just the answer itself."""
-
-_BETTER_FALLBACK = (
-    "Try using the STAR method: open with the **Situation** (one sentence), "
-    "describe your **Task**, walk through the key **Actions** you took (two to three sentences), "
-    "and close with the **Result** — ideally a measurable outcome. "
-    "Aim for 150–200 words, start with a confident statement, and cut any filler words."
-)
-
-
-def _weak_categories(scores: dict) -> str:
-    return ", ".join(
-        cat for cat in CATEGORIES if scores.get(cat, 0) < 6
-    ) or "overall polish"
-
-
-def generate_better_response(question: str, transcript: str, scores: dict) -> str:
-    """Return an example of a stronger answer. Tries Ollama → HuggingFace → template."""
-    prompt = _BETTER_PROMPT.format(
-        question=question,
-        transcript=transcript[:1500],
-        weak_cats=_weak_categories(scores),
-    )
-
-    def _try_ollama() -> str:
-        import ollama
-        client = ollama.Client(host=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
-        r = client.chat(
-            model=os.getenv("OLLAMA_MODEL", "llama3.2"),
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.4},
-        )
-        return r.message.content.strip()
-
-    def _try_huggingface() -> str:
-        from huggingface_hub import InferenceClient
-        token = os.getenv("HF_TOKEN", "")
-        client = InferenceClient(token=token if token else None)
-        return client.text_generation(
-            prompt,
-            model="mistralai/Mistral-7B-Instruct-v0.2",
-            max_new_tokens=300,
-            temperature=0.4,
-        ).strip()
-
-    for fn in [_try_ollama, _try_huggingface]:
-        try:
-            result = fn()
-            if result:
-                return result
-        except Exception:
-            continue
-
-    raise RuntimeError("LLM unavailable")
+    return round(sum(float(scores.get(c, 0)) for c in CATEGORIES) / len(CATEGORIES), 1)
