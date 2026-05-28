@@ -1,13 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '../context/AuthContext'
 
-const MODEL_OPTIONS = {
-  tiny:   'Tiny (~75 MB) — Fastest, OK accuracy',
-  base:   'Base (~145 MB) — Recommended for most machines',
-  small:  'Small (~465 MB) — Better accuracy, ~3× slower',
-  medium: 'Medium (~1.5 GB) — Best accuracy, needs 4+ GB RAM',
-}
-
 function Section({ title, children }) {
   return (
     <div style={{ marginBottom: 32 }}>
@@ -18,50 +11,33 @@ function Section({ title, children }) {
   )
 }
 
-function StatusBadge({ status }) {
-  if (!status) return null
-  const map = {
-    ok:      { cls: 'alert-success', icon: '✅' },
-    warn:    { cls: 'alert-warning', icon: '⚠️' },
-    error:   { cls: 'alert-error',   icon: '❌' },
-    loading: { cls: 'alert-info',    icon: '⏳' },
-  }
-  const { cls, icon } = map[status.type] || map.error
-  return <div className={`alert ${cls}`}>{icon} {status.message}</div>
-}
-
 export default function Settings() {
-  const { user } = useAuth()
+  const { user, getToken } = useAuth()
 
-  const [form, setForm] = useState({
-    transcription_model:       'base',
-    hf_token:                  '',
-    best_response_min_score:   '7.0',
-    silence_threshold_seconds: '5.0',
-  })
-
-  const [saved,      setSaved]      = useState(false)
-  const [saving,     setSaving]     = useState(false)
-  const [hfStatus,   setHfStatus]   = useState(null)
-  const [sysInfo,    setSysInfo]    = useState(null)
+  const [minScore,    setMinScore]    = useState('7.0')
+  const [saved,       setSaved]       = useState(false)
+  const [saving,      setSaving]      = useState(false)
   const [dangerCount, setDangerCount] = useState(null)
-  const [clearing,   setClearing]   = useState(false)
+  const [clearing,    setClearing]    = useState(false)
 
   useEffect(() => {
-    fetch('/api/settings').then(r => r.json()).then(data => setForm(f => ({ ...f, ...data }))).catch(() => {})
-    fetch('/api/system-info').then(r => r.json()).then(setSysInfo).catch(() => {})
+    fetch('/api/settings')
+      .then(r => r.ok ? r.json() : {})
+      .then(data => {
+        if (data.best_response_min_score) setMinScore(data.best_response_min_score)
+      })
+      .catch(() => {})
+
     if (user) {
-      fetch(`/api/responses?user_id=${user.id}`)
+      const token = getToken?.()
+      fetch(`/api/responses?user_id=${user.id}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
         .then(r => r.ok ? r.json() : [])
         .then(d => setDangerCount(Array.isArray(d) ? d.length : 0))
         .catch(() => {})
     }
-  }, [user])
-
-  function set(key, val) {
-    setForm(f => ({ ...f, [key]: val }))
-    setSaved(false)
-  }
+  }, [user, getToken])
 
   async function saveSettings() {
     setSaving(true); setSaved(false)
@@ -69,7 +45,7 @@ export default function Settings() {
       const res = await fetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify({ best_response_min_score: minScore }),
       })
       if (res.ok) setSaved(true)
       else throw new Error(await res.text())
@@ -78,32 +54,16 @@ export default function Settings() {
     } finally { setSaving(false) }
   }
 
-  async function testHF() {
-    if (!form.hf_token || form.hf_token === '***') {
-      setHfStatus({ type: 'warn', message: 'No token entered.' }); return
-    }
-    setHfStatus({ type: 'loading', message: 'Authenticating…' })
-    try {
-      const res = await fetch('/api/settings/test-hf', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: form.hf_token }),
-      })
-      const data = await res.json()
-      if (res.ok) setHfStatus({ type: 'ok', message: `Connected as ${data.username}.` })
-      else setHfStatus({ type: 'error', message: data.detail || 'Auth failed' })
-    } catch (e) {
-      setHfStatus({ type: 'error', message: String(e) })
-    }
-  }
-
   async function clearAll() {
     if (!user) { alert('Sign in to manage responses.'); return }
     if (!window.confirm(`Delete all ${dangerCount} saved responses? This cannot be undone.`)) return
     setClearing(true)
     try {
-      // Delete each response — Supabase RLS ensures only own rows are deleted
-      await fetch(`/api/responses/all?user_id=${user.id}`, { method: 'DELETE' })
+      const token = getToken?.()
+      await fetch(`/api/responses/all?user_id=${user.id}`, {
+        method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
       setDangerCount(0)
     } catch {
       alert('Delete failed — try again or remove responses individually.')
@@ -116,88 +76,40 @@ export default function Settings() {
         <span className="page-header-icon">⚙️</span>
         <div>
           <h2>Settings</h2>
-          <p>Configure AI models and preferences</p>
+          <p>Manage your preferences</p>
         </div>
       </div>
 
-      {/* ── Transcription ── */}
-      <Section title="🎙 Transcription Model">
-        <p className="caption" style={{ marginBottom: 12 }}>
-          faster-whisper runs server-side. Larger models are more accurate but slower.
+      {/* ── How it works ── */}
+      <div className="card" style={{ marginBottom: 32, borderLeft: '3px solid var(--accent)' }}>
+        <p style={{ margin: 0, fontSize: '0.95rem', lineHeight: 1.6 }}>
+          <strong>🤖 Scoring and transcription run on our servers.</strong><br />
+          No local setup or API keys required — just record and go.
         </p>
-        <div style={{ maxWidth: 400 }}>
-          <label>Model size</label>
-          <select value={form.transcription_model} onChange={e => set('transcription_model', e.target.value)}>
-            {Object.entries(MODEL_OPTIONS).map(([k, v]) => (
-              <option key={k} value={k}>{v}</option>
-            ))}
-          </select>
-        </div>
-      </Section>
-
-      {/* ── LLM Scoring ── */}
-      <Section title="🤖 Scoring Engine">
-        <p className="caption" style={{ marginBottom: 16 }}>
-          Scoring uses <strong>HuggingFace Inference API</strong> (<code>Mistral-7B-Instruct</code>)
-          with a rule-based fallback when HF is unavailable.
-          Add a free token at{' '}
-          <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer" style={{ color: 'var(--accent)' }}>
-            huggingface.co/settings/tokens
-          </a> for better results.
-        </p>
-        <div style={{ maxWidth: 400 }}>
-          <label>HuggingFace token</label>
-          <input
-            type="password"
-            value={form.hf_token}
-            onChange={e => set('hf_token', e.target.value)}
-            placeholder="hf_..."
-            style={{ background: 'var(--bg-2)', border: '1px solid var(--border)', borderRadius: 8, color: 'var(--text)', fontFamily: 'inherit', fontSize: '0.9rem', padding: '8px 12px', width: '100%', marginBottom: 10, outline: 'none' }}
-          />
-          <button className="btn btn-secondary" onClick={testHF} style={{ marginBottom: 8 }}>
-            Test HuggingFace connection
-          </button>
-          <StatusBadge status={hfStatus} />
-        </div>
-      </Section>
+      </div>
 
       {/* ── Preferences ── */}
       <Section title="🎛 Preferences">
-        <div className="grid-2" style={{ maxWidth: 600 }}>
-          <div>
-            <label>Min score to save: {parseFloat(form.best_response_min_score).toFixed(1)}</label>
-            <input
-              type="range" min={5} max={10} step={0.5}
-              value={form.best_response_min_score}
-              onChange={e => set('best_response_min_score', e.target.value)}
-              style={{ width: '100%', accentColor: 'var(--accent)', marginTop: 8 }}
-            />
-            <p className="caption">Responses must meet this threshold to be saved.</p>
-          </div>
-          <div>
-            <label>Silence auto-stop: {parseFloat(form.silence_threshold_seconds).toFixed(1)}s</label>
-            <input
-              type="range" min={2} max={10} step={0.5}
-              value={form.silence_threshold_seconds}
-              onChange={e => set('silence_threshold_seconds', e.target.value)}
-              style={{ width: '100%', accentColor: 'var(--accent)', marginTop: 8 }}
-            />
-            <p className="caption">Seconds of silence before the recorder auto-stops.</p>
-          </div>
+        <div style={{ maxWidth: 340 }}>
+          <label>Min score to save: {parseFloat(minScore).toFixed(1)}</label>
+          <input
+            type="range" min={5} max={10} step={0.5}
+            value={minScore}
+            onChange={e => { setMinScore(e.target.value); setSaved(false) }}
+            style={{ width: '100%', accentColor: 'var(--accent)', marginTop: 8 }}
+          />
+          <p className="caption">Responses must reach this score to appear in Best Responses.</p>
+        </div>
+
+        <div style={{ marginTop: 20 }}>
+          <button className="btn btn-primary" onClick={saveSettings} disabled={saving} style={{ minWidth: 160 }}>
+            {saving ? <><span className="spinner" /> Saving…</> : '💾 Save Settings'}
+          </button>
+          {saved && (
+            <span style={{ marginLeft: 12, color: 'var(--green)', fontSize: '0.9rem' }}>✅ Saved</span>
+          )}
         </div>
       </Section>
-
-      {/* ── Save button ── */}
-      <div style={{ marginBottom: 32 }}>
-        <button className="btn btn-primary" onClick={saveSettings} disabled={saving} style={{ minWidth: 180 }}>
-          {saving ? <><span className="spinner" /> Saving…</> : '💾 Save Settings'}
-        </button>
-        {saved && (
-          <span style={{ marginLeft: 12, color: 'var(--green)', fontSize: '0.9rem' }}>
-            ✅ Saved — restart the server for model changes to take effect.
-          </span>
-        )}
-      </div>
 
       {/* ── Danger zone ── */}
       <Section title="⚠️ Danger Zone">
@@ -210,40 +122,20 @@ export default function Settings() {
               You have <strong>{dangerCount}</strong> saved response{dangerCount !== 1 ? 's' : ''}.
             </p>
           )}
+          {!user && (
+            <p className="caption" style={{ marginBottom: 12, color: 'var(--muted)' }}>
+              Sign in to manage your responses.
+            </p>
+          )}
           <button
             className="btn btn-secondary"
             onClick={clearAll}
-            disabled={clearing || dangerCount === 0}
+            disabled={clearing || !user || dangerCount === 0}
             style={{ borderColor: 'rgba(239,68,68,0.4)', color: 'var(--red)' }}
           >
             {clearing ? <><span className="spinner" /> Deleting…</> : '🗑 Delete all saved responses'}
           </button>
         </div>
-      </Section>
-
-      {/* ── System info ── */}
-      <Section title="ℹ️ System Info">
-        {sysInfo ? (
-          <div className="grid-2" style={{ maxWidth: 520 }}>
-            <div>
-              <p className="caption" style={{ marginBottom: 6 }}><strong>Python:</strong> <code>{sysInfo.python}</code></p>
-              <p className="caption"><strong>Platform:</strong> <code>{sysInfo.platform}</code></p>
-            </div>
-            <div>
-              {[
-                ['faster-whisper', sysInfo.faster_whisper],
-                ['fastapi',        sysInfo.fastapi],
-                ['supabase',       sysInfo.supabase],
-              ].map(([name, ok]) => (
-                <p key={name} className="caption" style={{ marginBottom: 6 }}>
-                  <strong>{name}:</strong> {ok ? '✅ installed' : '❌ not installed'}
-                </p>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <span className="spinner" />
-        )}
       </Section>
     </>
   )

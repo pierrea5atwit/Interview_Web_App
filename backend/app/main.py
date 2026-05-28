@@ -9,7 +9,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -49,6 +49,26 @@ def get_config():
         # Non-sensitive app config the frontend needs at runtime
         "best_response_min_score": float(os.getenv("BEST_RESPONSE_MIN_SCORE", "7.0")),
     }
+
+
+# ── Auth dependency ────────────────────────────────────────────────────────────
+
+def _authed_client(request: Request):
+    """
+    FastAPI dependency — creates a per-request Supabase client authenticated
+    with the user's JWT so RLS policies see the correct auth.uid().
+    """
+    token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    url = os.getenv("SUPABASE_URL", "")
+    key = os.getenv("SUPABASE_ANON_KEY", "")
+    if not url or not key:
+        raise HTTPException(status_code=503, detail="Supabase not configured")
+    from supabase import create_client
+    client = create_client(url, key)
+    client.postgrest.auth(token)
+    return client
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -166,14 +186,8 @@ class SaveResponseRequest(BaseModel):
 
 
 @app.post("/api/responses")
-def save_response(req: SaveResponseRequest):
+def save_response(req: SaveResponseRequest, db=Depends(_authed_client)):
     """Persist a completed interview response to Supabase."""
-    db = get_client()
-    if not db:
-        raise HTTPException(
-            status_code=503,
-            detail="Supabase not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY.",
-        )
     try:
         db.table("responses").insert(req.model_dump()).execute()
         return {"status": "saved"}
@@ -184,14 +198,8 @@ def save_response(req: SaveResponseRequest):
 # ── 5. Get User Responses ──────────────────────────────────────────────────────
 
 @app.get("/api/responses")
-def get_responses(user_id: str = Query(...)):
+def get_responses(user_id: str = Query(...), db=Depends(_authed_client)):
     """Fetch all responses for a user, newest first."""
-    db = get_client()
-    if not db:
-        raise HTTPException(
-            status_code=503,
-            detail="Supabase not configured.",
-        )
     try:
         result = (
             db.table("responses")
@@ -209,17 +217,29 @@ def get_responses(user_id: str = Query(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── 6. Delete all responses ────────────────────────────────────────────────────
 
-# ── Public config (safe to expose — anon key only) ────────────────────────────
+@app.delete("/api/responses/all")
+def delete_all_responses(user_id: str = Query(...), db=Depends(_authed_client)):
+    """Delete every response belonging to a user."""
+    try:
+        db.table("responses").delete().eq("user_id", user_id).execute()
+        return {"status": "deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/config")
-def get_config():
-    """Return public Supabase credentials for the React frontend.
-    Called at runtime so HuggingFace Spaces secrets are available."""
-    return {
-        "supabase_url":      os.getenv("SUPABASE_URL", ""),
-        "supabase_anon_key": os.getenv("SUPABASE_ANON_KEY", ""),
-    }
+
+# ── 7. Delete a single response ────────────────────────────────────────────────
+
+@app.delete("/api/responses/{response_id}")
+def delete_response(response_id: str, db=Depends(_authed_client)):
+    """Delete a single response (RLS ensures the user can only delete their own rows)."""
+    try:
+        db.table("responses").delete().eq("id", response_id).execute()
+        return {"status": "deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ── Settings ───────────────────────────────────────────────────────────────────
 
@@ -227,30 +247,19 @@ def _read_env() -> dict:
     from dotenv import dotenv_values
     vals = dotenv_values(str(_ENV_PATH)) if _ENV_PATH.exists() else {}
     return {
-        "transcription_model": vals.get(
-            "TRANSCRIPTION_MODEL", os.getenv("TRANSCRIPTION_MODEL", "base")
+        "best_response_min_score": vals.get(
+            "BEST_RESPONSE_MIN_SCORE", os.getenv("BEST_RESPONSE_MIN_SCORE", "7.0")
         ),
-        "hf_token": vals.get("HF_TOKEN", os.getenv("HF_TOKEN", "")),
-        "silence_threshold_seconds": vals.get(
-            "SILENCE_THRESHOLD_SECONDS",
-            os.getenv("SILENCE_THRESHOLD_SECONDS", "5.0"),
-        ),
-        "supabase_configured": is_configured(),
     }
 
 
 @app.get("/api/settings")
 def get_settings():
-    s = _read_env()
-    s["hf_token"] = "***" if s["hf_token"] else ""
-    return s
+    return _read_env()
 
 
 class SettingsPayload(BaseModel):
-    transcription_model:        str = "base"
-    hf_token:                   str = ""
-    silence_threshold_seconds:  str = "5.0"
-    best_response_min_score:    str = "7.0"
+    best_response_min_score: str = "7.0"
 
 
 @app.post("/api/settings")
@@ -258,34 +267,10 @@ def save_settings(payload: SettingsPayload):
     try:
         from dotenv import set_key
         _ENV_PATH.touch(exist_ok=True)
-        mapping = {
-            "TRANSCRIPTION_MODEL":       payload.transcription_model,
-            "SILENCE_THRESHOLD_SECONDS": payload.silence_threshold_seconds,
-            "BEST_RESPONSE_MIN_SCORE":   payload.best_response_min_score,
-        }
-        if payload.hf_token and payload.hf_token != "***":
-            mapping["HF_TOKEN"] = payload.hf_token
-        for key, val in mapping.items():
-            set_key(str(_ENV_PATH), key, val)
+        set_key(str(_ENV_PATH), "BEST_RESPONSE_MIN_SCORE", payload.best_response_min_score)
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-class HFTestRequest(BaseModel):
-    token: str
-
-
-@app.post("/api/settings/test-hf")
-def test_hf(req: HFTestRequest):
-    if not req.token:
-        raise HTTPException(status_code=400, detail="No token provided")
-    try:
-        from huggingface_hub import whoami
-        info = whoami(token=req.token)
-        return {"ok": True, "username": info["name"]}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
 
 
 # ── System info ────────────────────────────────────────────────────────────────
@@ -293,11 +278,11 @@ def test_hf(req: HFTestRequest):
 @app.get("/api/system-info")
 def system_info():
     info = {
-        "python":           platform.python_version(),
-        "platform":         f"{platform.system()} {platform.release()}",
-        "faster_whisper":   False,
-        "fastapi":          False,
-        "supabase":         False,
+        "python":              platform.python_version(),
+        "platform":            f"{platform.system()} {platform.release()}",
+        "faster_whisper":      False,
+        "fastapi":             False,
+        "supabase":            False,
         "supabase_configured": is_configured(),
     }
     for pkg, key in [("faster_whisper", "faster_whisper"),
@@ -323,13 +308,3 @@ if _DIST.exists():
         if index.exists():
             return FileResponse(index)
         raise HTTPException(status_code=404, detail="Frontend not built")
-
-
-# ── 6. Delete a single response ────────────────────────────────────────────────
-
-@app.delete("/api/responses/all")
-def delete_all_responses(user_id: str = Query(...)):
-    """Delete every response belonging to a user."""
-    db = get_client()
-    if not db:
-        raise HTTPException(status)

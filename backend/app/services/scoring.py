@@ -1,9 +1,8 @@
 """
-Scoring service — three-tier inference with rule-based fallback.
+Scoring service — two-tier inference with rule-based fallback.
 
 Tier 1: HuggingFace serverless API  (requires HF_TOKEN, fastest)
-Tier 2: Local openbmb/MiniCPM5-1B  (requires transformers, ~2 GB RAM, no token)
-Tier 3: Rule-based heuristics       (always works, no model needed)
+Tier 2: Rule-based heuristics       (always works, no model needed)
 
 Output schema (always):
   clarity      float 0-10
@@ -13,12 +12,11 @@ Output schema (always):
   relevance    float 0-10
   suggestion   str   one specific actionable improvement (≤30 words)
   encouragement str  one encouraging sentence (≤20 words)
-  scorer       str   "huggingface" | "local_minicpm" | "rule_based"
+  scorer       str   "huggingface" | "rule_based" | "rule_based (HF error: <type>)"
 """
 import json
 import os
 import re
-import threading
 from .filler import analyze_fillers
 
 CATEGORIES = ["clarity", "conciseness", "structure", "confidence", "relevance"]
@@ -88,7 +86,7 @@ def _score_with_huggingface(question: str, transcript: str) -> dict:
     client = InferenceClient(token=token)
 
     response = client.chat_completion(
-        model="mistralai/Mistral-7B-Instruct-v0.2",
+        model="HuggingFaceH4/zephyr-7b-beta",
         messages=[
             {"role": "system", "content": _SYSTEM},
             {"role": "user",   "content": _USER_PROMPT.format(
@@ -106,100 +104,7 @@ def _score_with_huggingface(question: str, transcript: str) -> dict:
     return result
 
 
-# ── Local MiniCPM5-1B inference (Tier 2) ──────────────────────────────────────
-
-_minicpm_lock = threading.Lock()
-_minicpm_model = None
-_minicpm_tokenizer = None
-_MINICPM_MODEL_ID = "openbmb/MiniCPM5-1B"
-
-
-def _load_minicpm():
-    """Lazy-load MiniCPM5-1B into RAM (CPU). Thread-safe singleton."""
-    global _minicpm_model, _minicpm_tokenizer
-    if _minicpm_model is not None:
-        return _minicpm_model, _minicpm_tokenizer
-
-    with _minicpm_lock:
-        # Double-checked locking
-        if _minicpm_model is not None:
-            return _minicpm_model, _minicpm_tokenizer
-
-        import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
-
-        cache_dir = os.getenv("HF_HUB_CACHE", None)
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            _MINICPM_MODEL_ID,
-            trust_remote_code=True,
-            cache_dir=cache_dir,
-        )
-        model = AutoModelForCausalLM.from_pretrained(
-            _MINICPM_MODEL_ID,
-            trust_remote_code=True,
-            torch_dtype=torch.float32,   # CPU-safe; bfloat16 unsupported on CPU
-            device_map="cpu",
-            cache_dir=cache_dir,
-        )
-        model.eval()
-
-        _minicpm_model = model
-        _minicpm_tokenizer = tokenizer
-
-    return _minicpm_model, _minicpm_tokenizer
-
-
-def _score_with_minicpm(question: str, transcript: str) -> dict:
-    import torch
-
-    model, tokenizer = _load_minicpm()
-
-    messages = [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user",   "content": _USER_PROMPT.format(
-            question=question,
-            transcript=transcript[:1500],
-        )},
-    ]
-
-    # apply_chat_template with thinking disabled (MiniCPM5 feature)
-    try:
-        input_ids = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-            enable_thinking=False,
-        )
-    except TypeError:
-        # Older tokenizer versions don't have enable_thinking
-        input_ids = tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_tensors="pt",
-        )
-
-    with torch.no_grad():
-        output_ids = model.generate(
-            input_ids,
-            max_new_tokens=300,
-            temperature=0.2,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-
-    # Decode only the newly generated tokens
-    new_tokens = output_ids[0][input_ids.shape[-1]:]
-    raw = tokenizer.decode(new_tokens, skip_special_tokens=True)
-
-    result = _normalise(_parse_json(raw))
-    result["scorer"] = "local_minicpm"
-    return result
-
-
-# ── Rule-based fallback (Tier 3) ──────────────────────────────────────────────
+# ── Rule-based fallback (Tier 2) ──────────────────────────────────────────────
 
 _SUGGESTIONS = {
     "clarity":     "Use shorter sentences and one concrete example to make your point easy to follow.",
@@ -273,29 +178,20 @@ def _score_rule_based(question: str, transcript: str) -> dict:
 
 def score_response(question: str, transcript: str) -> dict:
     """
-    Three-tier scoring:
+    Two-tier scoring:
       1. HuggingFace serverless (if HF_TOKEN is set)
-      2. Local MiniCPM5-1B     (if transformers is installed)
-      3. Rule-based heuristics (always)
+      2. Rule-based heuristics (always available)
+
+    If HF fails, falls back to rule-based and surfaces the error in the scorer field.
     """
-    # Tier 1 — HF serverless
     if os.getenv("HF_TOKEN", "").strip():
         try:
             return _score_with_huggingface(question, transcript)
-        except Exception:
-            pass  # fall through to next tier
-
-    # Tier 2 — local MiniCPM5-1B
-    try:
-        import transformers  # noqa: F401 — check availability
-        return _score_with_minicpm(question, transcript)
-    except Exception:
-        pass  # fall through to rule-based
-
-    # Tier 3 — rule-based (always works)
-    result = _score_rule_based(question, transcript)
-    result["scorer"] = "rule_based"
-    return result
+        except Exception as e:
+            result = _score_rule_based(question, transcript)
+            result["scorer"] = f"rule_based (HF error: {type(e).__name__})"
+            return result
+    return _score_rule_based(question, transcript)
 
 
 def overall_score(scores: dict) -> float:

@@ -129,7 +129,7 @@ function useAudioRecorder({ onStop, silenceSeconds = SILENCE_SECONDS }) {
 }
 
 // ── ScorePanel ─────────────────────────────────────────────────────────────────
-function ScorePanel({ result, currentQ, transcript, filler, userId, minScore = 7.0 }) {
+function ScorePanel({ result, currentQ, transcript, filler, userId, getToken, minScore = 7.0 }) {
   const [saved,   setSaved]   = useState(false)
   const [saving,  setSaving]  = useState(false)
   const [saveErr, setSaveErr] = useState(null)
@@ -155,9 +155,13 @@ function ScorePanel({ result, currentQ, transcript, filler, userId, minScore = 7
     if (!userId) { setSaveErr('Sign in to save responses.'); return }
     setSaving(true); setSaveErr(null)
     try {
+      const token = getToken?.()
       const res = await fetch('/api/responses', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({
           user_id:       userId,
           question_id:   currentQ?.id   ?? '',
@@ -266,7 +270,7 @@ function FillerMetrics({ filler }) {
 
 // ── Practice page ──────────────────────────────────────────────────────────────
 export default function Practice() {
-  const { user } = useAuth()
+  const { user, getToken } = useAuth()
   const [minScore, setMinScore] = useState(7.0)
 
   // Load runtime config (best_response_min_score may differ from default 7.0)
@@ -464,6 +468,7 @@ export default function Practice() {
             transcript={transcript}
             filler={filler}
             userId={user?.id ?? null}
+            getToken={getToken}
             minScore={minScore}
           />
         </div>

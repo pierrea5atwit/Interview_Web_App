@@ -46,6 +46,7 @@ export function AuthProvider({ children }) {
   const signOut = () => sbRef.current?.auth.signOut()
 
   const user = session?.user ?? null
+  const getToken = () => session?.access_token ?? null
 
   return (
     <AuthContext.Provider value={{
@@ -55,6 +56,7 @@ export function AuthProvider({ children }) {
       signUp,
       signOut,
       loading: session === undefined,
+      getToken,
     }}>
       {children}
     </AuthContext.Provider>

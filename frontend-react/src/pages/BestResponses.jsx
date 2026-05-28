@@ -23,7 +23,7 @@ function ProgressBar({ value }) {
   )
 }
 
-function ResponseCard({ resp, onDelete }) {
+function ResponseCard({ resp, onDelete, getToken }) {
   const [open, setOpen]       = useState(false)
   const [deleting, setDeleting] = useState(false)
 
@@ -46,7 +46,11 @@ function ResponseCard({ resp, onDelete }) {
   async function handleDelete() {
     setDeleting(true)
     try {
-      await fetch(`/api/responses/${id}`, { method: 'DELETE' })
+      const token = getToken?.()
+      await fetch(`/api/responses/${id}`, {
+        method: 'DELETE',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
       onDelete(id)
     } finally { setDeleting(false) }
   }
@@ -139,7 +143,7 @@ function ResponseCard({ resp, onDelete }) {
 }
 
 export default function BestResponses() {
-  const { user } = useAuth()
+  const { user, getToken } = useAuth()
   const [all, setAll]           = useState([])
   const [loading, setLoading]   = useState(true)
   const [minScore, setMinScore] = useState(0)
@@ -148,7 +152,10 @@ export default function BestResponses() {
   const load = useCallback(() => {
     if (!user) { setLoading(false); return }
     setLoading(true); setError(null)
-    fetch(`/api/responses?user_id=${user.id}`)
+    const token = getToken?.()
+    fetch(`/api/responses?user_id=${user.id}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
       .then(r => {
         if (!r.ok) throw new Error(`API error ${r.status}`)
         return r.json()
@@ -156,7 +163,7 @@ export default function BestResponses() {
       .then(data => setAll(Array.isArray(data) ? data.sort((a, b) => b.overall_score - a.overall_score) : []))
       .catch(e => { setError(e.message); setAll([]) })
       .finally(() => setLoading(false))
-  }, [user])
+  }, [user, getToken])
 
   useEffect(() => { load() }, [load])
 
@@ -241,7 +248,7 @@ export default function BestResponses() {
             <strong>{filtered.length}</strong> of {total} responses
           </p>
           {filtered.map(resp => (
-            <ResponseCard key={resp.id} resp={resp} onDelete={handleDelete} />
+            <ResponseCard key={resp.id} resp={resp} onDelete={handleDelete} getToken={getToken} />
           ))}
         </>
       )}
