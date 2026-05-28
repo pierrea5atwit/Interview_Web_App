@@ -1,29 +1,26 @@
-"""FastAPI backend for InterviewAI Coach."""
+"""FastAPI backend — InterviewAI Coach."""
+import hashlib
 import os
 import platform
 import sys
+import uuid
 from pathlib import Path
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from backend.app.services.responses import (
-    load_best_responses,
-    save_best_response,
-    delete_response,
-    load_questions,
-    _RESPONSES_FILE,
-)
+from backend.app.services.supabase_client import get_client, is_configured
 from backend.app.services.scoring import score_response, overall_score, CATEGORIES
 from backend.app.services.transcription import transcribe_audio
 from backend.app.services.filler import analyze_fillers
 
-app = FastAPI(title="InterviewAI Coach API", version="1.0.0")
+app = FastAPI(title="InterviewAI Coach API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -35,97 +32,161 @@ app.add_middleware(
 _ENV_PATH = Path(__file__).parent.parent.parent / ".env"
 
 
-# ── Questions ──────────────────────────────────────────────────────────────────
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _question_id(text: str) -> str:
+    """Deterministic UUID from question text for local-JSON fallback."""
+    return str(uuid.UUID(bytes=hashlib.md5(text.encode()).digest()))
+
+
+def _load_local_questions():
+    """Load questions.json as fallback when Supabase isn't configured."""
+    from backend.app.services.responses import load_questions
+    return load_questions()
+
+
+# ── 1. Questions ───────────────────────────────────────────────────────────────
 
 @app.get("/api/questions")
-def get_questions():
-    try:
-        return load_questions()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def get_questions(
+    role: str = Query(..., description="e.g. software_engineering"),
+    type: str = Query(..., description="behavioral | technical | mixed"),
+    difficulty: Optional[int] = Query(None, description="0=easy 1=medium 2=hard"),
+):
+    """Fetch role-specific questions from Supabase (falls back to local JSON)."""
+    db = get_client()
+
+    if db:
+        try:
+            q = db.table("questions").select("id, question_text") \
+                  .eq("role", role).eq("type", type)
+            if difficulty is not None:
+                q = q.eq("difficulty", difficulty)
+            result = q.execute()
+            if result.data:
+                return result.data
+            # Empty result — fall through to local JSON
+        except Exception:
+            pass
+
+    # Local JSON fallback (generates deterministic UUIDs)
+    bank = _load_local_questions()
+    questions = bank.get(role, {}).get(type, [])
+    items = [{"id": _question_id(t), "question_text": t} for t in questions]
+    if difficulty is not None:
+        # Heuristic filter: technical=2, behavioral=0, mixed=1
+        heuristic = {"behavioral": 0, "technical": 2, "mixed": 1}.get(type, 1)
+        if difficulty != heuristic:
+            items = []
+    return items
 
 
-# ── Transcription ──────────────────────────────────────────────────────────────
+# ── 2. Transcribe ──────────────────────────────────────────────────────────────
 
 @app.post("/api/transcribe")
-async def transcribe(audio: UploadFile = File(...)):
+async def transcribe(file: UploadFile = File(...)):
+    """Audio → transcript + filler stats."""
     try:
-        audio_bytes = await audio.read()
-        transcript = transcribe_audio(audio_bytes)
-        filler = analyze_fillers(transcript)
-        return {"transcript": transcript, "filler": filler}
+        audio_bytes = await file.read()
+        transcript  = transcribe_audio(audio_bytes)
+        filler      = analyze_fillers(transcript)
+        return {"transcript": transcript, "filler_count": filler["filler_count"],
+                "filler_rate": filler["filler_rate"], "filler": filler}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Scoring ────────────────────────────────────────────────────────────────────
+# ── 3. Score ───────────────────────────────────────────────────────────────────
 
 class ScoreRequest(BaseModel):
-    question: str
     transcript: str
+    question:   str
 
 
 @app.post("/api/score")
 def score(req: ScoreRequest):
+    """
+    AI scoring via HuggingFace → rule-based fallback.
+    Returns flat JSON with all five scores + overall_score + suggestion + encouragement.
+    """
     try:
         scores = score_response(req.question, req.transcript)
-        ov = overall_score(scores)
-        return {"scores": scores, "overall_score": ov, "categories": CATEGORIES}
+        ov     = overall_score(scores)
+        return {
+            "clarity":      scores.get("clarity",     5.0),
+            "conciseness":  scores.get("conciseness", 5.0),
+            "structure":    scores.get("structure",   5.0),
+            "confidence":   scores.get("confidence",  5.0),
+            "relevance":    scores.get("relevance",   5.0),
+            "overall_score": ov,
+            "suggestion":   scores.get("suggestion",    ""),
+            "encouragement":scores.get("encouragement", ""),
+            "scorer":       scores.get("scorer", "unknown"),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Best Responses ─────────────────────────────────────────────────────────────
+# ── 4. Save Response ───────────────────────────────────────────────────────────
 
-@app.get("/api/best-responses")
-def get_best_responses():
-    try:
-        return load_best_responses()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-class SaveRequest(BaseModel):
-    question: str
-    transcript: str
-    scores: dict
+class SaveResponseRequest(BaseModel):
+    user_id:      str
+    question_id:  str
+    transcript:   str
+    clarity:      float
+    conciseness:  float
+    structure:    float
+    confidence:   float
+    relevance:    float
     overall_score: float
-    role: str
-    interview_type: str
+    suggestion:   str = ""
+    encouragement: str = ""
+    filler_count: int   = 0
+    filler_rate:  float = 0.0
 
 
-@app.post("/api/best-responses")
-def create_best_response(req: SaveRequest):
-    saved = save_best_response(
-        question=req.question,
-        transcript=req.transcript,
-        scores=req.scores,
-        overall_score=req.overall_score,
-        role=req.role,
-        interview_type=req.interview_type,
-    )
-    if not saved:
-        raise HTTPException(status_code=400, detail="Score below threshold (7.0)")
-    return {"ok": True}
-
-
-@app.delete("/api/best-responses/all")
-def delete_all_responses():
-    """Clear every saved response (danger zone)."""
+@app.post("/api/responses")
+def save_response(req: SaveResponseRequest):
+    """Persist a completed interview response to Supabase."""
+    db = get_client()
+    if not db:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY.",
+        )
     try:
-        _RESPONSES_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _RESPONSES_FILE.write_text("[]", encoding="utf-8")
-        return {"ok": True}
+        db.table("responses").insert(req.model_dump()).execute()
+        return {"status": "saved"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/api/best-responses/{response_id}")
-def delete_best_response(response_id: str):
-    deleted = delete_response(response_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="Response not found")
-    return {"ok": True}
+# ── 5. Get User Responses ──────────────────────────────────────────────────────
+
+@app.get("/api/responses")
+def get_responses(user_id: str = Query(...)):
+    """Fetch all responses for a user, newest first."""
+    db = get_client()
+    if not db:
+        raise HTTPException(
+            status_code=503,
+            detail="Supabase not configured.",
+        )
+    try:
+        result = (
+            db.table("responses")
+              .select(
+                  "id, question_id, transcript, clarity, conciseness, structure, "
+                  "confidence, relevance, overall_score, suggestion, encouragement, "
+                  "filler_count, filler_rate, created_at"
+              )
+              .eq("user_id", user_id)
+              .order("created_at", desc=True)
+              .execute()
+        )
+        return result.data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Settings ───────────────────────────────────────────────────────────────────
@@ -134,29 +195,29 @@ def _read_env() -> dict:
     from dotenv import dotenv_values
     vals = dotenv_values(str(_ENV_PATH)) if _ENV_PATH.exists() else {}
     return {
-        "transcription_model":    vals.get("TRANSCRIPTION_MODEL",       os.getenv("TRANSCRIPTION_MODEL", "base")),
-        "ollama_base_url":        vals.get("OLLAMA_BASE_URL",           os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")),
-        "ollama_model":           vals.get("OLLAMA_MODEL",              os.getenv("OLLAMA_MODEL", "llama3.2")),
-        "hf_token":               vals.get("HF_TOKEN",                  os.getenv("HF_TOKEN", "")),
-        "best_response_min_score":vals.get("BEST_RESPONSE_MIN_SCORE",  os.getenv("BEST_RESPONSE_MIN_SCORE", "7.0")),
-        "silence_threshold_seconds": vals.get("SILENCE_THRESHOLD_SECONDS", os.getenv("SILENCE_THRESHOLD_SECONDS", "5.0")),
+        "transcription_model": vals.get(
+            "TRANSCRIPTION_MODEL", os.getenv("TRANSCRIPTION_MODEL", "base")
+        ),
+        "hf_token": vals.get("HF_TOKEN", os.getenv("HF_TOKEN", "")),
+        "silence_threshold_seconds": vals.get(
+            "SILENCE_THRESHOLD_SECONDS",
+            os.getenv("SILENCE_THRESHOLD_SECONDS", "5.0"),
+        ),
+        "supabase_configured": is_configured(),
     }
 
 
 @app.get("/api/settings")
 def get_settings():
-    settings = _read_env()
-    settings["hf_token"] = "***" if settings["hf_token"] else ""
-    return settings
+    s = _read_env()
+    s["hf_token"] = "***" if s["hf_token"] else ""
+    return s
 
 
 class SettingsPayload(BaseModel):
-    transcription_model: str = "base"
-    ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = "llama3.2"
-    hf_token: str = ""
-    best_response_min_score: str = "7.0"
-    silence_threshold_seconds: str = "5.0"
+    transcription_model:        str = "base"
+    hf_token:                   str = ""
+    silence_threshold_seconds:  str = "5.0"
 
 
 @app.post("/api/settings")
@@ -166,9 +227,6 @@ def save_settings(payload: SettingsPayload):
         _ENV_PATH.touch(exist_ok=True)
         mapping = {
             "TRANSCRIPTION_MODEL":       payload.transcription_model,
-            "OLLAMA_BASE_URL":           payload.ollama_base_url,
-            "OLLAMA_MODEL":              payload.ollama_model,
-            "BEST_RESPONSE_MIN_SCORE":   payload.best_response_min_score,
             "SILENCE_THRESHOLD_SECONDS": payload.silence_threshold_seconds,
         }
         if payload.hf_token and payload.hf_token != "***":
@@ -178,24 +236,6 @@ def save_settings(payload: SettingsPayload):
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-class OllamaTestRequest(BaseModel):
-    url: str
-    model: str
-
-
-@app.post("/api/settings/test-ollama")
-def test_ollama(req: OllamaTestRequest):
-    try:
-        import ollama
-        client = ollama.Client(host=req.url)
-        models = client.list()
-        names = [m.model for m in models.models]
-        model_found = req.model in names or any(req.model in n for n in names)
-        return {"ok": True, "model_found": model_found, "available_models": names[:8]}
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
 
 
 class HFTestRequest(BaseModel):
@@ -219,17 +259,15 @@ def test_hf(req: HFTestRequest):
 @app.get("/api/system-info")
 def system_info():
     info = {
-        "python":   platform.python_version(),
-        "platform": f"{platform.system()} {platform.release()}",
-        "faster_whisper": False,
-        "ollama":         False,
-        "fastapi":        False,
+        "python":           platform.python_version(),
+        "platform":         f"{platform.system()} {platform.release()}",
+        "faster_whisper":   False,
+        "fastapi":          False,
+        "supabase":         False,
+        "supabase_configured": is_configured(),
     }
-    for pkg, key in [
-        ("faster_whisper", "faster_whisper"),
-        ("ollama",         "ollama"),
-        ("fastapi",        "fastapi"),
-    ]:
+    for pkg, key in [("faster_whisper", "faster_whisper"),
+                     ("fastapi", "fastapi"), ("supabase", "supabase")]:
         try:
             __import__(pkg)
             info[key] = True
@@ -251,3 +289,31 @@ if _DIST.exists():
         if index.exists():
             return FileResponse(index)
         raise HTTPException(status_code=404, detail="Frontend not built")
+
+
+# ── 6. Delete a single response ────────────────────────────────────────────────
+
+@app.delete("/api/responses/all")
+def delete_all_responses(user_id: str = Query(...)):
+    """Delete every response belonging to a user."""
+    db = get_client()
+    if not db:
+        raise HTTPException(status_code=503, detail="Supabase not configured.")
+    try:
+        db.table("responses").delete().eq("user_id", user_id).execute()
+        return {"status": "deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/responses/{response_id}")
+def delete_response(response_id: str):
+    """Delete a single response by ID."""
+    db = get_client()
+    if not db:
+        raise HTTPException(status_code=503, detail="Supabase not configured.")
+    try:
+        db.table("responses").delete().eq("id", response_id).execute()
+        return {"status": "deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

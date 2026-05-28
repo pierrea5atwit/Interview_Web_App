@@ -57,3 +57,5 @@ backend/app/uploads/
 
 # Data (keep the empty file, not personal responses)
 data/best_responses.json
+.env
+*.env.local

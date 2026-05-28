@@ -385,3 +385,60 @@ audio {
   margin: 8px 0;
   border-radius: 8px;
 }
+
+/* ── Login page ────────────────────────────────── */
+.login-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  padding: 24px;
+}
+
+.login-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 40px 36px;
+  width: 100%;
+  max-width: 400px;
+}
+
+.login-input {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.9rem;
+  padding: 9px 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.login-input:focus { border-color: var(--accent); }
+
+/* ── Sidebar user section ──────────────────────── */
+.sidebar-user {
+  margin-top: auto;
+  padding-top: 8px;
+}
+
+.sidebar-user-email {
+  font-size: 0.75rem;
+  color: var(--muted-2);
+  padding: 4px 12px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-logout-btn {
+  color: var(--muted-2);
+  font-size: 0.85rem;
+}
+.sidebar-logout-btn:hover {
+  background: rgba(239,68,68,0.1);
+  color: var(--red);
+}
